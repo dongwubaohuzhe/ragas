@@ -1,9 +1,9 @@
 @echo off
-REM Install script for RAGAS Evaluation Project
-REM This script sets up the Python 3.12 virtual environment and installs all dependencies
+REM UV installer script for RAGAS Evaluation Project
+REM Installs UV if not present, then installs project dependencies
 
 echo ================================================
-echo RAGAS Evaluation Project - Installation Script
+echo RAGAS Evaluation Project - UV Installation
 echo ================================================
 echo.
 
@@ -11,88 +11,131 @@ REM Get the directory where this script is located
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
-REM Check if .venv already exists
-if exist ".venv" (
-    echo Virtual environment already exists.
+REM Check if UV is installed (try direct command first)
+where uv >nul 2>&1
+if %errorlevel% equ 0 (
+    echo UV is already installed!
+    uv --version
     echo.
-    choice /C YN /M "Do you want to remove it and create a new one"
-    if errorlevel 2 goto :skip_venv_creation
-    if errorlevel 1 (
-        echo Removing existing virtual environment...
-        rmdir /s /q .venv
-        echo.
+    echo Running uv sync to install project dependencies...
+    uv sync
+    goto :end
+)
+
+REM Check if UV is installed via Python 3.12
+py -3.12 -m uv --version >nul 2>&1
+if %errorlevel% equ 0 (
+    echo UV is already installed via Python 3.12!
+    py -3.12 -m uv --version
+    echo.
+    echo Running uv sync to install project dependencies...
+    py -3.12 -m uv sync
+    goto :end
+)
+
+REM Check if UV is installed via default Python
+python -m uv --version >nul 2>&1
+if %errorlevel% equ 0 (
+    echo UV is already installed via Python!
+    python -m uv --version
+    echo.
+    echo Running uv sync to install project dependencies...
+    python -m uv sync
+    goto :end
+)
+
+echo UV is not installed. Installing UV...
+echo.
+
+REM Try to install UV using PowerShell first
+echo Attempting to install UV via PowerShell...
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex" 2>nul
+
+REM Check if PowerShell installation was successful
+where uv >nul 2>&1
+if %errorlevel% equ 0 (
+    echo.
+    echo UV installed successfully via PowerShell!
+    uv --version
+    echo.
+    echo Installing project dependencies...
+    uv sync
+    if %errorlevel% equ 0 (
+        goto :end
+    ) else (
+        echo ERROR: Failed to sync dependencies.
+        pause
+        exit /b 1
     )
 )
 
-:skip_venv_creation
+REM PowerShell installation failed or blocked, try pip installation
+echo.
+echo PowerShell installation failed or blocked by policy.
+echo Attempting to install UV using pip with Python 3.12...
+echo.
 
-REM Only create venv if it doesn't exist
-if not exist ".venv" (
-    REM Try to use Python 3.12, fall back to default Python
-    echo Checking for Python 3.12...
-    py -3.12 --version >nul 2>&1
+REM Check for Python 3.12
+py -3.12 --version >nul 2>&1
+if %errorlevel% equ 0 (
+    echo Found Python 3.12, installing UV via pip...
+    py -3.12 -m pip install uv
     if %errorlevel% equ 0 (
-        echo Found Python 3.12!
-        echo Creating virtual environment with Python 3.12...
-        py -3.12 -m venv .venv
-    ) else (
-        echo Python 3.12 not found. Checking for default Python...
-        python --version >nul 2>&1
+        echo.
+        echo UV installed successfully via pip with Python 3.12!
+        echo Installing project dependencies...
+        py -3.12 -m uv sync
         if %errorlevel% equ 0 (
-            python --version
-            echo Creating virtual environment with default Python...
-            python -m venv .venv
+            goto :end
         ) else (
-            echo ERROR: Python is not installed or not in PATH.
-            echo Please install Python 3.12 or later and try again.
+            echo ERROR: Failed to sync dependencies.
             pause
             exit /b 1
         )
     )
-
-    if not exist ".venv" (
-        echo ERROR: Failed to create virtual environment.
-        pause
-        exit /b 1
-    )
-    echo.
-    echo Virtual environment created successfully!
-) else (
-    echo.
-    echo Using existing virtual environment.
 )
-echo.
-echo Activating virtual environment and installing dependencies...
-echo.
 
-REM Activate virtual environment
-call .venv\Scripts\activate.bat
-
-REM Upgrade pip
-echo Upgrading pip...
-python -m pip install --upgrade pip >nul 2>&1
-
-REM Install requirements with faster resolver
-echo Installing dependencies from requirements.txt...
-echo Using strict dependency resolution for faster installation...
-python -m pip install --no-deps --upgrade pip setuptools wheel >nul 2>&1
-python -m pip install -r requirements.txt --no-cache-dir
-
+REM Try with default Python
+python --version >nul 2>&1
 if %errorlevel% equ 0 (
-    echo.
-    echo ================================================
-    echo Installation completed successfully!
-    echo ================================================
-    echo.
-    echo You can now run the application using start.bat
-    echo.
-) else (
-    echo.
-    echo ERROR: Failed to install dependencies.
-    echo Please check requirements.txt and try again.
-    pause
-    exit /b 1
+    echo Trying with default Python...
+    python -m pip install uv
+    if %errorlevel% equ 0 (
+        echo.
+        echo UV installed successfully via pip with default Python!
+        echo Installing project dependencies...
+        python -m uv sync
+        if %errorlevel% equ 0 (
+            goto :end
+        ) else (
+            echo ERROR: Failed to sync dependencies.
+            pause
+            exit /b 1
+        )
+    )
 )
 
+REM All installation methods failed
+echo.
+echo ERROR: UV installation failed with all methods.
+echo.
+echo Please install UV manually using one of these methods:
+echo   1. Visit: https://github.com/astral-sh/uv
+echo   2. PowerShell: powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+echo   3. Pip with Python 3.12: py -3.12 -m pip install uv
+echo   4. Pip with default Python: python -m pip install uv
+echo   5. Then run: install.bat again
+echo.
+pause
+exit /b 1
+
+:end
+echo.
+echo ================================================
+echo Setup completed!
+echo ================================================
+echo.
+echo To start the application, run: start.bat
+echo.
 pause
 

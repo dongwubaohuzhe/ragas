@@ -55,12 +55,15 @@ The application requires **two separate connections**:
 
 ## Prerequisites
 
-1. **Python 3.12+** (or Python 3.x with fallback)
-2. **AWS Credentials** configured for Bedrock access
+1. **Python 3.12+** (required for UV installation)
+2. **UV** - Fast Python package manager
+   - Auto-installed by `install.bat`
+   - Or install manually: https://github.com/astral-sh/uv
+3. **AWS Credentials** configured for Bedrock access
    - Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
    - IAM role (if running on EC2)
    - AWS credentials file (`~/.aws/credentials`)
-3. **API Access** to the knowledge base service
+4. **API Access** to the knowledge base service
    - API URL
    - Bearer token
    - Tenant information
@@ -68,49 +71,50 @@ The application requires **two separate connections**:
 
 ## Installation
 
-### Windows (Automated)
+### UV Installation (Fast & Conflict-Free)
 
-**Standard Installation:**
-1. Run `install.bat` to set up virtual environment and install dependencies
+**UV** is a fast Python package manager that automatically resolves dependencies without version conflicts.
+
+**Quick Setup:**
+1. Run `install.bat` - This will install UV (if needed) and set up the project automatically
 2. Run `start.bat` to launch the application
 
-**Fast Installation (Recommended for slow connections):**
-1. Run `install-fast.bat` for faster installation with strict version constraints
-2. Uses `--no-cache-dir` and optimized resolver for faster downloads
-3. Run `start.bat` to launch the application
+**Alternative:** If UV is already installed, you can use `uv-install.bat` which only syncs dependencies.
 
-### Manual Installation
+**Manual UV Setup:**
 ```bash
-# Create virtual environment
-python -m venv .venv
+# Install UV (if not installed)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# Activate virtual environment
-# Windows:
-.venv\Scripts\activate
-# Linux/Mac:
-source .venv/bin/activate
+# Install project dependencies (UV automatically resolves versions)
+uv sync
 
-# Install dependencies
-pip install -r requirements.txt
+# Run the application
+uv run streamlit run streamlit_ragas_eval.py
 ```
+
+**Benefits of UV:**
+- ✅ Automatic dependency resolution (no version conflicts)
+- ✅ Much faster installation (10-100x faster than pip)
+- ✅ No need to specify exact versions
+- ✅ Automatically creates and manages virtual environment
+- ✅ Works seamlessly with Python 3.12+
 
 ## Running the Application
 
-### Windows
 ```bash
+# Windows
 start.bat
-```
 
-### Manual
-```bash
-streamlit run streamlit_ragas_eval.py
+# Or manually
+uv run streamlit run streamlit_ragas_eval.py
 ```
 
 ## Configuration
 
 ### Environment Variables (Optional)
 
-Create a `.env` file in the project root (see `.env.example` for template):
+Create a `.env` file in the project root with the following variables:
 
 ```bash
 # AWS Configuration
@@ -124,8 +128,11 @@ TENANT=tenant-name
 KNOWLEDGE_BASE_NAME=kb-name
 
 # SSL Configuration
+# Set to "true" to verify SSL certificates (recommended for production)
 SSL_VERIFY=false
 ```
+
+**Note**: The `.env` file is gitignored for security. Create it manually using the template above.
 
 ### AWS Credentials Setup
 
@@ -279,11 +286,11 @@ ragas/
 ├── streamlit_ui.py          # UI components
 ├── model_config.py          # Model configurations
 ├── config.py                # Configuration constants
-├── requirements.txt         # Python dependencies
-├── install.bat             # Windows installation script
-├── start.bat                # Windows startup script
-├── setup_venv.bat           # Virtual environment setup
-├── .env.example             # Environment variables template
+├── pyproject.toml           # UV project configuration
+├── install.bat              # Main installation script (installs UV if needed + dependencies)
+├── uv-install.bat           # Alternative installation script (tries to install UV + dependencies)
+├── start.bat                # UV startup script
+├── .env                      # Environment variables (create from template below)
 ├── example_test_plan.csv    # Example test plan
 └── README.md                # This file
 ```
