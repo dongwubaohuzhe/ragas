@@ -80,7 +80,7 @@ class StreamlitUI:
             try:
                 df = pd.read_csv(uploaded_file)
                 st.success(f"✅ Loaded {len(df)} questions from test plan")
-                st.dataframe(df.head(), use_container_width=True)
+                st.dataframe(df.head(), width='stretch')
                
                 # Validate required columns
                 required_columns = {'question', 'ground_truth'}
@@ -115,7 +115,7 @@ class StreamlitUI:
         st.header("2. Run Evaluation")
         st.info(f"📊 Ready to evaluate {len(test_data)} test cases")
         
-        if st.button("🚀 Start RAGAS Evaluation", type="primary", use_container_width=True):
+        if st.button("🚀 Start RAGAS Evaluation", type="primary"):
             api_url, bearer_token, tenant, knowledge_base_name, model_id, embedding_model_id = config
            
             # Validate configuration
@@ -178,7 +178,7 @@ class StreamlitUI:
         st.sidebar.info("Test connections before running evaluation")
         
         # Test API Connection
-        if st.sidebar.button("🧪 Test API Connection", use_container_width=True, key="test_api_btn"):
+        if st.sidebar.button("🧪 Test API Connection", key="test_api_btn"):
             if not all([api_url, bearer_token, tenant, knowledge_base_name]):
                 st.sidebar.error("❌ Please fill in API URL, Bearer Token, Tenant, and Knowledge Base Name")
             else:
@@ -197,7 +197,7 @@ class StreamlitUI:
                         st._ragas_skip_ui = original_flag
         
         # Test Bedrock Connection
-        if st.sidebar.button("🧪 Test Bedrock Connection", use_container_width=True, key="test_bedrock_btn"):
+        if st.sidebar.button("🧪 Test Bedrock Connection", key="test_bedrock_btn"):
             with st.spinner("Testing Bedrock connection..."):
                 # Temporarily set flag to prevent UI re-rendering during import
                 original_flag = getattr(st, '_ragas_skip_ui', False)

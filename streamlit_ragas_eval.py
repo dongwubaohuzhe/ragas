@@ -7,8 +7,8 @@ import pandas as pd
 import requests
 from datasets import Dataset
 from typing import List, Dict, Any, Optional, Tuple
-from langchain_community.chat_models import BedrockChat
-from langchain_community.embeddings import BedrockEmbeddings
+from langchain_aws import ChatBedrock
+from langchain_aws import BedrockEmbeddings
 from ragas import evaluate
 from ragas.metrics import faithfulness, context_recall, context_precision, answer_relevancy
 from model_config import get_model_config
@@ -155,7 +155,7 @@ class SimpleAPIRetriever:
         return []
 
 def generate_answer_from_context(question: str, contexts: List[str], 
-                                 llm_model: Optional[BedrockChat] = None) -> str:
+                                 llm_model: Optional[ChatBedrock] = None) -> str:
     """
     Generate an answer from context using LLM or extractive methods
     
@@ -325,7 +325,7 @@ def run_ragas_evaluation(
                     answer_gen_kwargs.get("maxTokenCount", MAX_ANSWER_TOKENS)
                 )
             
-            llm_model = BedrockChat(
+            llm_model = ChatBedrock(
                 region_name=AWS_REGION_NAME,
                 model_id=model_id,
                 model_kwargs=answer_gen_kwargs
@@ -368,7 +368,7 @@ def run_ragas_evaluation(
     #    model_kwargs={"temperature": 0.1, "max_tokens": 512}
     #)
 
-    bedrock_model = BedrockChat(
+    bedrock_model = ChatBedrock(
         region_name=AWS_REGION_NAME,
         model_id=model_id,
         model_kwargs=model_config["kwargs"]
@@ -514,7 +514,7 @@ def test_bedrock_connection(model_id: str, embedding_model_id: str) -> Dict[str,
     try:
         model_config = get_model_config(model_id)
         start_time = time.time()
-        llm_model = BedrockChat(
+        llm_model = ChatBedrock(
             region_name=AWS_REGION_NAME,
             model_id=model_id,
             model_kwargs=model_config["kwargs"]
