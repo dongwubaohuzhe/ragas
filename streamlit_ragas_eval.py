@@ -578,14 +578,17 @@ def test_bedrock_connection(model_id: str, embedding_model_id: str) -> Dict[str,
     
     return result
 
-from streamlit_ui import StreamlitUI
-
-# Main application
-st.title("RAGAS Evaluation Tool")
-
-ui = StreamlitUI()
-config = ui.render_sidebar()
-test_data = ui.render_file_upload()
-
-if test_data:
-    ui.render_evaluation_section(test_data, config, run_ragas_evaluation)
+# Always render the UI - only skip if we're being imported during a test
+# Use a module-level flag to track if we're in an import context
+if not hasattr(st, '_ragas_skip_ui') or not st._ragas_skip_ui:
+    from streamlit_ui import StreamlitUI
+    
+    # Main application
+    st.title("RAGAS Evaluation Tool")
+    
+    ui = StreamlitUI()
+    config = ui.render_sidebar()
+    test_data = ui.render_file_upload()
+    
+    if test_data:
+        ui.render_evaluation_section(test_data, config, run_ragas_evaluation)

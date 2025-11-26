@@ -17,21 +17,46 @@ class StreamlitUI:
        
     def render_sidebar(self):
         st.sidebar.header("⚙️ Configuration")
-       
-        api_url = st.sidebar.text_input("API URL", value=self.api_url)
-        bearer_token = st.sidebar.text_input("Bearer Token", type="password")
-        tenant = st.sidebar.text_input("Tenant", value=self.tenant)
-        knowledge_base_name = st.sidebar.text_input("Knowledge Base Name", value=self.knowledge_base_name)
-       
+        
+        # Initialize session state for form values if not present
+        if 'sidebar_api_url' not in st.session_state:
+            st.session_state.sidebar_api_url = self.api_url
+        if 'sidebar_bearer_token' not in st.session_state:
+            st.session_state.sidebar_bearer_token = ""
+        if 'sidebar_tenant' not in st.session_state:
+            st.session_state.sidebar_tenant = self.tenant
+        if 'sidebar_kb_name' not in st.session_state:
+            st.session_state.sidebar_kb_name = self.knowledge_base_name
+        if 'sidebar_model_id' not in st.session_state:
+            st.session_state.sidebar_model_id = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+        if 'sidebar_embedding_id' not in st.session_state:
+            st.session_state.sidebar_embedding_id = "amazon.titan-embed-text-v2:0"
+        
+        api_url = st.sidebar.text_input("API URL", value=st.session_state.sidebar_api_url, key="sidebar_api_url_input")
+        bearer_token = st.sidebar.text_input("Bearer Token", type="password", value=st.session_state.sidebar_bearer_token, key="sidebar_bearer_token_input")
+        tenant = st.sidebar.text_input("Tenant", value=st.session_state.sidebar_tenant, key="sidebar_tenant_input")
+        knowledge_base_name = st.sidebar.text_input("Knowledge Base Name", value=st.session_state.sidebar_kb_name, key="sidebar_kb_name_input")
+        
         model_id = st.sidebar.selectbox(
             "LLM Model",
-            ["anthropic.claude-3-5-sonnet-20240620-v1:0","anthropic.claude-3-7-sonnet-20250219-v1:0","amazon.titan-text-express-v1"]
+            ["anthropic.claude-3-5-sonnet-20240620-v1:0","anthropic.claude-3-7-sonnet-20250219-v1:0","amazon.titan-text-express-v1"],
+            index=0 if st.session_state.sidebar_model_id == "anthropic.claude-3-5-sonnet-20240620-v1:0" else (1 if st.session_state.sidebar_model_id == "anthropic.claude-3-7-sonnet-20250219-v1:0" else 2),
+            key="sidebar_model_id_select"
         )
-       
+        
         embedding_model_id = st.sidebar.selectbox(
             "Embedding Model",
-            ["amazon.titan-embed-text-v2:0"]
+            ["amazon.titan-embed-text-v2:0"],
+            key="sidebar_embedding_id_select"
         )
+        
+        # Update session state with current values
+        st.session_state.sidebar_api_url = api_url
+        st.session_state.sidebar_bearer_token = bearer_token
+        st.session_state.sidebar_tenant = tenant
+        st.session_state.sidebar_kb_name = knowledge_base_name
+        st.session_state.sidebar_model_id = model_id
+        st.session_state.sidebar_embedding_id = embedding_model_id
        
         # Connection Testing Section
         self._render_connection_tests(api_url, bearer_token, tenant, knowledge_base_name, model_id, embedding_model_id)
@@ -153,22 +178,37 @@ class StreamlitUI:
         st.sidebar.info("Test connections before running evaluation")
         
         # Test API Connection
-        if st.sidebar.button("🧪 Test API Connection", use_container_width=True, key="test_api"):
+        if st.sidebar.button("🧪 Test API Connection", use_container_width=True, key="test_api_btn"):
             if not all([api_url, bearer_token, tenant, knowledge_base_name]):
                 st.sidebar.error("❌ Please fill in API URL, Bearer Token, Tenant, and Knowledge Base Name")
             else:
-                with st.sidebar.spinner("Testing API connection..."):
-                    from streamlit_ragas_eval import test_api_connection, extract_model_name_for_api
-                    api_model_name = extract_model_name_for_api(model_id)
-                    result = test_api_connection(api_url, bearer_token, tenant, knowledge_base_name, api_model_name)
-                    st.session_state['api_test_result'] = result
+                with st.spinner("Testing API connection..."):
+                    # Temporarily set flag to prevent UI re-rendering during import
+                    original_flag = getattr(st, '_ragas_skip_ui', False)
+                    st._ragas_skip_ui = True
+                    try:
+                        # Import the functions we need
+                        from streamlit_ragas_eval import test_api_connection, extract_model_name_for_api
+                        api_model_name = extract_model_name_for_api(model_id)
+                        result = test_api_connection(api_url, bearer_token, tenant, knowledge_base_name, api_model_name)
+                        st.session_state['api_test_result'] = result
+                    finally:
+                        # Always restore the flag
+                        st._ragas_skip_ui = original_flag
         
         # Test Bedrock Connection
-        if st.sidebar.button("🧪 Test Bedrock Connection", use_container_width=True, key="test_bedrock"):
-            with st.sidebar.spinner("Testing Bedrock connection..."):
-                from streamlit_ragas_eval import test_bedrock_connection
-                result = test_bedrock_connection(model_id, embedding_model_id)
-                st.session_state['bedrock_test_result'] = result
+        if st.sidebar.button("🧪 Test Bedrock Connection", use_container_width=True, key="test_bedrock_btn"):
+            with st.spinner("Testing Bedrock connection..."):
+                # Temporarily set flag to prevent UI re-rendering during import
+                original_flag = getattr(st, '_ragas_skip_ui', False)
+                st._ragas_skip_ui = True
+                try:
+                    from streamlit_ragas_eval import test_bedrock_connection
+                    result = test_bedrock_connection(model_id, embedding_model_id)
+                    st.session_state['bedrock_test_result'] = result
+                finally:
+                    # Always restore the flag
+                    st._ragas_skip_ui = original_flag
         
         # Display test results
         if 'api_test_result' in st.session_state or 'bedrock_test_result' in st.session_state:
