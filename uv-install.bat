@@ -97,7 +97,7 @@ REM Sync project dependencies (creates .venv automatically if needed)
 echo Installing project dependencies with UV...
 echo This will automatically resolve compatible versions...
 echo.
-uv sync
+uv sync --no-install-project
 goto :sync_complete
 
 :uv_installed_pip
@@ -110,7 +110,7 @@ REM Sync project dependencies using Python module
 echo Installing project dependencies with UV...
 echo This will automatically resolve compatible versions...
 echo.
-%UV_CMD% sync
+%UV_CMD% sync --no-install-project
 goto :sync_complete
 
 :sync_complete

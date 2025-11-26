@@ -87,7 +87,7 @@ The application requires **two separate connections**:
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # Install project dependencies (UV automatically resolves versions)
-uv sync
+uv sync --no-install-project
 
 # Run the application
 uv run streamlit run streamlit_ragas_eval.py

@@ -70,10 +70,13 @@ if not exist "streamlit_ragas_eval.py" (
     exit /b 1
 )
 
-REM Run the Streamlit application using UV
+REM Run the Streamlit application using the virtual environment
 echo Launching Streamlit application...
 echo.
-%UV_CMD% run streamlit run streamlit_ragas_eval.py
+
+REM Activate virtual environment and run streamlit directly
+call .venv\Scripts\activate.bat
+streamlit run streamlit_ragas_eval.py
 
 REM If streamlit exits, keep the window open to see any error messages
 if %errorlevel% neq 0 (
