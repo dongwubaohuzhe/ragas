@@ -1,0 +1,5 @@
+question,ground_truth
+What is the purpose of this system?,The system is designed to evaluate RAG applications using automated testing.
+How do I configure the API?,Configure the API by providing the URL, bearer token, tenant, and knowledge base name in the sidebar.
+What metrics are used for evaluation?,The tool uses four metrics: Faithfulness, Context Recall, Context Precision, and Answer Relevancy.
+
