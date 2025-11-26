@@ -1,9 +1,9 @@
 @echo off
-REM Install script for RAGAS Evaluation Project
-REM This script sets up the Python 3.12 virtual environment and installs all dependencies
+REM Fast installation script with strict dependency constraints
+REM This script uses pip's resolver with no cache for faster installation
 
 echo ================================================
-echo RAGAS Evaluation Project - Installation Script
+echo RAGAS Evaluation Project - Fast Installation
 echo ================================================
 echo.
 
@@ -63,20 +63,20 @@ if not exist ".venv" (
 )
 echo.
 echo Activating virtual environment and installing dependencies...
+echo Using fast installation mode (no cache, strict versions)...
 echo.
 
 REM Activate virtual environment
 call .venv\Scripts\activate.bat
 
-REM Upgrade pip
-echo Upgrading pip...
-python -m pip install --upgrade pip >nul 2>&1
+REM Upgrade pip and install build tools first
+echo Upgrading pip and build tools...
+python -m pip install --upgrade pip setuptools wheel --no-cache-dir >nul 2>&1
 
-REM Install requirements with faster resolver
-echo Installing dependencies from requirements.txt...
-echo Using strict dependency resolution for faster installation...
-python -m pip install --no-deps --upgrade pip setuptools wheel >nul 2>&1
-python -m pip install -r requirements.txt --no-cache-dir
+REM Install requirements with optimizations
+echo Installing dependencies with strict version constraints...
+echo This may take a few minutes...
+python -m pip install -r requirements.txt --no-cache-dir --no-warn-script-location
 
 if %errorlevel% equ 0 (
     echo.
@@ -89,9 +89,19 @@ if %errorlevel% equ 0 (
 ) else (
     echo.
     echo ERROR: Failed to install dependencies.
-    echo Please check requirements.txt and try again.
-    pause
-    exit /b 1
+    echo.
+    echo Trying with legacy resolver...
+    python -m pip install -r requirements.txt --no-cache-dir --use-deprecated=legacy-resolver
+    if %errorlevel% equ 0 (
+        echo.
+        echo Installation completed with legacy resolver!
+    ) else (
+        echo.
+        echo ERROR: Installation failed even with legacy resolver.
+        echo Please check requirements.txt and try again.
+        pause
+        exit /b 1
+    )
 )
 
 pause

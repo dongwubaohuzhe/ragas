@@ -69,8 +69,15 @@ The application requires **two separate connections**:
 ## Installation
 
 ### Windows (Automated)
+
+**Standard Installation:**
 1. Run `install.bat` to set up virtual environment and install dependencies
 2. Run `start.bat` to launch the application
+
+**Fast Installation (Recommended for slow connections):**
+1. Run `install-fast.bat` for faster installation with strict version constraints
+2. Uses `--no-cache-dir` and optimized resolver for faster downloads
+3. Run `start.bat` to launch the application
 
 ### Manual Installation
 ```bash
