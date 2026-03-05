@@ -22,6 +22,7 @@ from config import (
     MAX_WORKERS,
     ITEM_TIMEOUT,
 )
+import sys
 import time
 import random
 import logging
@@ -608,17 +609,20 @@ def run_ragas_evaluation(
         if "ragas_eval_start_time" not in st.session_state:
             st.session_state.ragas_eval_start_time = time.time()
 
-        # Placeholders for rich progress panel and per-item report
+        # Separate single-element placeholders to avoid stacking from .container()
+        activity_placeholder = st.empty()
         progress_placeholder = st.empty()
-        report_placeholder = st.empty()
+        status_placeholder = st.empty()
+        report_header_placeholder = st.empty()
+        report_table_placeholder = st.empty()
 
-        def _update_progress_ui(completed_count: int, stage: str = "Processing items") -> None:
-            """Refresh the progress panel with counts, stage, and elapsed time."""
+        def _update_progress_ui(completed_count: int, activity: str, stage_detail: str = "") -> None:
+            """Refresh activity headline, progress bar, and status line."""
             frac = completed_count / n_total if n_total else 0
             elapsed = time.time() - st.session_state.get("ragas_eval_start_time", time.time())
             mins, secs = divmod(int(elapsed), 60)
             counts = _counts_by_status(results_by_index, list(results_by_index.keys()))
-            parts = [f"**{completed_count} / {n_total}** items processed"]
+            parts = [f"**{completed_count} / {n_total}** items"]
             detail_parts = []
             if counts["success"]:
                 detail_parts.append(f"✅ {counts['success']} OK")
@@ -631,42 +635,43 @@ def run_ragas_evaluation(
             if detail_parts:
                 parts.append(" · ".join(detail_parts))
             parts.append(f"⏱ Elapsed: {mins}m {secs:02d}s")
-            parts.append(f"**Stage:** {stage}")
-            with progress_placeholder.container():
-                st.progress(frac)
-                st.caption(" &nbsp;|&nbsp; ".join(parts))
+            if stage_detail:
+                parts.append(stage_detail)
+            activity_placeholder.markdown(f"### {activity}")
+            progress_placeholder.progress(frac)
+            status_placeholder.caption(" &nbsp;|&nbsp; ".join(parts))
 
         def _show_report_table(results: ResultsByIndex) -> None:
-            """Render the per-item report header + table into report_placeholder (replaces previous content)."""
+            """Render the per-item report into separate header + table placeholders."""
             if not results:
                 return
-            with report_placeholder.container():
-                st.subheader("Step 1 of 2 — Retrieval & Answer Generation")
-                st.dataframe(
-                    _report_rows_from_results(results),
-                    width="stretch",
-                    height=min(400, 50 * len(results)),
-                )
+            report_header_placeholder.markdown("**Step 1 of 2 — Retrieval & Answer Generation**")
+            report_table_placeholder.dataframe(
+                _report_rows_from_results(results),
+                width="stretch",
+                height=min(400, 50 * len(results)),
+            )
 
         # Immediately render current progress from session state so the UI is never blank after a rerun
         if results_by_index and not stopped:
             completed = len(results_by_index)
             remaining_count = len(pending)
-            stage = st.session_state.get("ragas_eval_stage", "")
-            if stage == "scoring":
+            current_stage = st.session_state.get("ragas_eval_stage", "")
+            if current_stage == "scoring":
                 scoring_elapsed = int(time.time() - st.session_state.get("ragas_scoring_start", time.time()))
                 s_mins, s_secs = divmod(scoring_elapsed, 60)
                 _update_progress_ui(
                     completed,
-                    stage=f"Step 2 of 2 — RAGAS scoring ({_RAGAS_METRIC_NAMES}) … {s_mins}m {s_secs:02d}s",
+                    f"Step 2 of 2 — RAGAS Scoring in progress… ({s_mins}m {s_secs:02d}s)",
+                    f"Metrics: {_RAGAS_METRIC_NAMES}",
                 )
             elif pending:
                 _update_progress_ui(
                     completed,
-                    stage=f"Step 1 of 2 — Retrieving & generating answers ({remaining_count} remaining)",
+                    f"Step 1 of 2 — Retrieving & generating answers… ({remaining_count} remaining)",
                 )
             else:
-                _update_progress_ui(completed, stage="All items processed — preparing RAGAS scoring…")
+                _update_progress_ui(completed, "All items processed — preparing RAGAS scoring…")
             _show_report_table(results_by_index)
 
         # ----- Scoring stage: RAGAS metrics running in background thread -----
@@ -678,6 +683,9 @@ def run_ragas_evaluation(
             is_partial = st.session_state.get("ragas_eval_stopped", False)
 
             if future is not None and future.done():
+                # Clear the in-place heartbeat line before logging the completion message
+                sys.stderr.write("\r" + " " * 100 + "\r")
+                sys.stderr.flush()
                 try:
                     result, questions = future.result()
                 except Exception as exc:
@@ -687,18 +695,19 @@ def run_ragas_evaluation(
                     return None, None, None
                 if result is not None:
                     counts = _counts_by_status(results_by_index, sorted(results_by_index.keys()))
-                    logger.info("RAGAS metrics computed in %dm %02ds — %d OK, %d partial, %d failed, %d timeout",
+                    logger.info("RAGAS scoring complete in %dm %02ds — %d OK, %d partial, %d failed, %d timeout",
                                 s_mins, s_secs, counts["success"], counts["partial"], counts["failed"], counts["timeout"])
                 else:
                     st.error("RAGAS metric computation failed. Check the console for details.")
                 _clear_ragas_eval_state()
                 return (result, questions, "partial_stopped" if is_partial else None)
 
-            # Still running — log heartbeat and schedule next rerun
-            logger.info(
-                "RAGAS scoring in progress (%s) for %d items… %dm %02ds elapsed",
-                _RAGAS_METRIC_NAMES, len(results_by_index), s_mins, s_secs,
+            # Still running — overwrite the same console line with updated elapsed time
+            n_items = len(results_by_index)
+            sys.stderr.write(
+                f"\rINFO: RAGAS scoring ({_RAGAS_METRIC_NAMES}) — {n_items} items — {s_mins}m {s_secs:02d}s elapsed"
             )
+            sys.stderr.flush()
             time.sleep(3)
             return None, None, "in_progress"
 
@@ -710,7 +719,7 @@ def run_ragas_evaluation(
             indices_done = sorted(results_by_index.keys())
             completed = len(indices_done)
             if st.session_state.get("ragas_eval_stage") != "scoring":
-                _update_progress_ui(completed, stage="Stopped — starting RAGAS scoring for partial results…")
+                _update_progress_ui(completed, "Stopped — starting RAGAS scoring for partial results…")
                 _show_report_table(results_by_index)
                 _start_ragas_scoring(results_by_index, indices_done, get_config)
                 st.session_state.ragas_eval_stopped = True
@@ -725,7 +734,7 @@ def run_ragas_evaluation(
                 retry_timeout_sec = item_timeout_sec * 2
                 _update_progress_ui(
                     len(results_by_index),
-                    stage=f"Retrying {len(timeout_indices)} timed-out item(s) (timeout {retry_timeout_sec}s)…",
+                    f"Retrying {len(timeout_indices)} timed-out item(s) (timeout {retry_timeout_sec}s)…",
                 )
                 logger.info("Retrying %d timed-out items with %ds timeout", len(timeout_indices), retry_timeout_sec)
                 config = get_config()
@@ -771,7 +780,7 @@ def run_ragas_evaluation(
             if st.session_state.get("ragas_eval_stage") != "scoring":
                 _update_progress_ui(
                     len(results_by_index),
-                    stage="All items processed — starting RAGAS scoring…",
+                    "All items processed — starting RAGAS scoring…",
                 )
                 _start_ragas_scoring(results_by_index, indices, get_config)
                 return None, None, "in_progress"
@@ -829,7 +838,7 @@ def run_ragas_evaluation(
             remaining_count = len(pending)
             _update_progress_ui(
                 completed,
-                stage=f"Processing items ({remaining_count} remaining, batch size {len(batch_indices)})",
+                f"Step 1 of 2 — Retrieving & generating answers… ({remaining_count} remaining)",
             )
             _show_report_table(results_by_index)
             logger.info("Batch complete — %d/%d items done, %d remaining", completed, n_total, remaining_count)
