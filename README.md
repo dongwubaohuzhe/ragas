@@ -41,7 +41,7 @@ The application requires **two separate connections**:
 - **Supported Models**:
   - LLM: Claude Sonnet 4.5, Claude 3.7 Sonnet, Claude 3.5 Sonnet, Claude 3 Sonnet, Claude 3 Haiku, Amazon Nova Pro, Amazon Titan Text Express, Amazon Titan Text Lite
   - Embeddings: Amazon Titan Embed Text v1/v2, Cohere Embed English/Multilingual v3
-- **Inference Profiles**: Optional cross-region inference profile support for environments where on-demand model invocation is not available (e.g. GovCloud). All models use their base model ID by default; enter an inference profile in the sidebar only if on-demand invocation is not supported in your account/region.
+- **Inference Profiles**: Cross-region inference profile support for models where on-demand invocation is not available (e.g. Claude Sonnet 4.5 in GovCloud). Models that require an inference profile use one automatically; the sidebar field lets you override with a different profile ID or ARN.
 
 ### Architecture Diagram
 ```
@@ -203,7 +203,7 @@ In the sidebar, configure:
 - **Tenant**: Tenant identifier
 - **Knowledge Base Name**: Name of the knowledge base to query
 - **LLM Model**: Bedrock model for evaluation (Claude Sonnet 4.5, Claude 3.x family, Nova Pro, Titan)
-- **Inference Profile ID or ARN** (optional): Override the base model ID with an inference profile ID or ARN. Leave blank for standard on-demand invocation. Only needed in GovCloud or restricted regions where on-demand invocation is not supported — for example, enter `us.anthropic.claude-sonnet-4-5-20250929-v1:0` for Claude Sonnet 4.5 cross-region access.
+- **Inference Profile ID or ARN** (optional): Override the default model invocation ID. Claude Sonnet 4.5 automatically uses its cross-region inference profile (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`) since on-demand invocation is not supported. Use this field to override with a different profile ID or ARN if the default doesn't work in your region.
 - **Embedding Model**: Bedrock embedding model (Titan Embed, Cohere Embed)
 
 ### Step 3: Upload and Run
@@ -281,10 +281,10 @@ The test plan CSV must have **at least two columns**. After upload, you choose w
 **Error**: `Provider us model does not support chat` or `Invocation of model ID ... with on-demand throughput isn't supported` or `The provided model identifier is invalid`
 
 **Solution**:
-- By default the app invokes Bedrock using the base model ID (e.g. `anthropic.claude-sonnet-4-5-20250929-v1:0`). This works in most accounts where on-demand access is enabled for the model.
-- If on-demand invocation is **not** supported in your account/region (common in GovCloud), enter an inference profile ID or ARN in the sidebar **Inference Profile ID or ARN** field. Example: `us.anthropic.claude-sonnet-4-5-20250929-v1:0`
-- The "Provider us model does not support chat" error means the app is passing a cross-region inference profile (e.g. `us.anthropic.*`) and the LangChain provider isn't being detected correctly — this is handled automatically when you use the sidebar field, but check that the profile ID is correct.
-- For GovCloud or restricted regions, ask your AWS admin for the inference profile ARN for your model.
+- Models that don't support on-demand invocation (e.g. Claude Sonnet 4.5) automatically use their configured cross-region inference profile (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`).
+- If the default profile doesn't work in your region, enter the correct inference profile ID or ARN in the sidebar **Inference Profile ID or ARN** field. Ask your AWS admin for the profile ARN if needed.
+- The "Provider us model does not support chat" error means a cross-region inference profile (e.g. `us.anthropic.*`) is being used but LangChain isn't detecting the provider — the app handles this automatically, but verify the profile ID is correct.
+- For other models, on-demand invocation (base model ID) is used by default. If you get "on-demand not supported" for another model, enter its inference profile in the sidebar field.
 
 #### 5. Evaluation Timeout
 **Error**: Evaluation takes too long or times out

@@ -92,11 +92,12 @@ def get_api_model_name(model_id: str) -> Optional[str]:
 def get_model_invocation_id(model_id: str, override: str = "") -> str:
     """Return the invocation ID for Bedrock API calls.
 
-    If *override* is provided (e.g. from the UI sidebar), use that.
-    Otherwise return the base *model_id* for standard on-demand invocation.
-    The ``inference_profile_id`` in config is only a hint for the UI help
-    text; it is never applied automatically.
+    Priority: UI sidebar override > config ``inference_profile_id`` > base *model_id*.
+    Models like Claude Sonnet 4.5 do not support on-demand invocation and
+    require an inference profile; the config stores the default profile so it
+    is applied automatically.
     """
     if override and override.strip():
         return override.strip()
-    return model_id
+    cfg = SUPPORTED_MODELS.get(model_id, {})
+    return cfg.get("inference_profile_id", model_id)
