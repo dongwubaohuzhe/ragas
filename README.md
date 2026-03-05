@@ -208,7 +208,7 @@ In the sidebar, configure:
 2. Select **Question column** and **Ground truth column** (defaults to `question` / `ground_truth` if present)
 3. Verify the loaded data preview
 4. Click **🚀 Start RAGAS Evaluation**
-5. Evaluation runs in batches; you can click **▶️ Continue evaluation** for the next batch or **⏹️ Stop evaluation** to finish early with partial results
+5. Evaluation runs automatically in batches. Click **⏹️ Stop evaluation** at any time to finish early with partial results
 
 ### Step 4: Download Results
 

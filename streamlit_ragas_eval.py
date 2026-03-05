@@ -69,6 +69,11 @@ logger.setLevel(_LOG_LEVEL)
 
 # Reduce Bedrock/LangChain console noise: INFO and their ERROR tracebacks (we handle and log errors ourselves)
 logging.getLogger("langchain_aws").setLevel(logging.CRITICAL)
+# Silence RAGAS executor's "Exception raised in Job[N]: TimeoutError()" spam (we handle retries ourselves)
+logging.getLogger("ragas.executor").setLevel(logging.CRITICAL)
+logging.getLogger("ragas.utils").setLevel(logging.WARNING)
+# Disable tqdm progress bars on the console (we show progress in the Streamlit UI instead)
+os.environ.setdefault("TQDM_DISABLE", "1")
 
 EXPIRED_TOKEN_MESSAGE = (
     "AWS security token expired. Refresh your credentials (e.g. run 'aws sso login' or refresh your session) and try again."
@@ -83,8 +88,9 @@ def _is_expired_token(e: Exception) -> bool:
             and e.response.get("Error", {}).get("Code") == "ExpiredTokenException"
         )
     except ImportError:
-        s = str(e).lower()
-        return "ExpiredTokenException" in str(e) or ("security token" in s and "expired" in s)
+        msg = str(e)
+        msg_lower = msg.lower()
+        return "ExpiredTokenException" in msg or ("security token" in msg_lower and "expired" in msg_lower)
 
 def _format_bedrock_error(e: Exception) -> str:
     """User-friendly message for Bedrock errors; avoids long tracebacks for expired token."""
@@ -466,7 +472,7 @@ def _process_one_item(
 
 
 def _build_ragas_from_results(
-    results_by_index: Dict[int, Tuple[str, str, List[str], str, str, float, Optional[str]]],
+    results_by_index: ResultsByIndex,
     indices: List[int],
     get_config: Callable[[], Tuple[str, str, str, str, str, str]],
 ) -> Tuple[Optional[Any], Optional[List[str]]]:
@@ -516,6 +522,7 @@ def _build_ragas_from_results(
                 metrics=[faithfulness, context_recall, context_precision, answer_relevancy],
                 llm=bedrock_model,
                 embeddings=bedrock_embeddings,
+                show_progress=False,
             )
             return result, questions_list
         except Exception as e:
@@ -533,7 +540,11 @@ def _build_ragas_from_results(
 
 
 def _clear_ragas_eval_state() -> None:
-    for key in ("ragas_eval_phase", "ragas_eval_pending", "ragas_eval_results", "ragas_eval_test_data", "ragas_eval_stopped"):
+    for key in (
+        "ragas_eval_phase", "ragas_eval_pending", "ragas_eval_results",
+        "ragas_eval_test_data", "ragas_eval_stopped",
+        "ragas_eval_start_time", "ragas_eval_stage",
+    ):
         st.session_state.pop(key, None)
 
 
@@ -568,9 +579,37 @@ def run_ragas_evaluation(
         test_data = st.session_state.get("ragas_eval_test_data") or test_data
         stopped = st.session_state.get("ragas_eval_stopped", False)
 
-        st.subheader("📋 Per-item evaluation report")
+        # Track wall-clock start so we can show elapsed time on the UI
+        if "ragas_eval_start_time" not in st.session_state:
+            st.session_state.ragas_eval_start_time = time.time()
+
+        # Placeholders for rich progress panel and per-item report
         progress_placeholder = st.empty()
         report_placeholder = st.empty()
+
+        def _update_progress_ui(completed_count: int, stage: str = "Processing items") -> None:
+            """Refresh the progress panel with counts, stage, and elapsed time."""
+            frac = completed_count / n_total if n_total else 0
+            elapsed = time.time() - st.session_state.get("ragas_eval_start_time", time.time())
+            mins, secs = divmod(int(elapsed), 60)
+            counts = _counts_by_status(results_by_index, list(results_by_index.keys()))
+            parts = [f"**{completed_count} / {n_total}** items processed"]
+            detail_parts = []
+            if counts["success"]:
+                detail_parts.append(f"✅ {counts['success']} succeeded")
+            if counts["partial"]:
+                detail_parts.append(f"⚠️ {counts['partial']} partial")
+            if counts["failed"]:
+                detail_parts.append(f"❌ {counts['failed']} failed")
+            if counts["timeout"]:
+                detail_parts.append(f"⏱️ {counts['timeout']} timed out")
+            if detail_parts:
+                parts.append(" · ".join(detail_parts))
+            parts.append(f"⏱ Elapsed: {mins}m {secs:02d}s")
+            parts.append(f"**Stage:** {stage}")
+            with progress_placeholder.container():
+                st.progress(frac)
+                st.caption(" &nbsp;|&nbsp; ".join(parts))
 
         if stopped:
             if not results_by_index:
@@ -579,13 +618,15 @@ def run_ragas_evaluation(
                 return None, None, "partial_stopped"
             indices_done = sorted(results_by_index.keys())
             completed = len(indices_done)
-            progress_placeholder.progress(completed / n_total)
+            _update_progress_ui(completed, stage="Stopped — computing RAGAS metrics for partial results…")
+            if results_by_index:
+                st.subheader("📋 Per-item evaluation report")
             report_placeholder.dataframe(
                 _report_rows_from_results(results_by_index),
                 width="stretch",
                 height=min(400, 50 * completed),
             )
-            st.info("⏳ Computing RAGAS metrics for partial results…")
+            logger.info("Evaluation stopped by user at %d/%d items — computing partial metrics", completed, n_total)
             result, questions = _build_ragas_from_results(results_by_index, indices_done, get_config)
             _clear_ragas_eval_state()
             return (result, questions, "partial_stopped")
@@ -596,7 +637,11 @@ def run_ragas_evaluation(
             timeout_indices = [i for i in indices if results_by_index.get(i, ("", "", [], "", "timeout", 0.0, ""))[_STATUS_IDX] == "timeout"]
             if timeout_indices and not _shutdown_requested:
                 retry_timeout_sec = item_timeout_sec * 2
-                st.info(f"🔄 Retrying {len(timeout_indices)} timed-out item(s) with {retry_timeout_sec}s timeout…")
+                _update_progress_ui(
+                    len(results_by_index),
+                    stage=f"Retrying {len(timeout_indices)} timed-out item(s) (timeout {retry_timeout_sec}s)…",
+                )
+                logger.info("Retrying %d timed-out items with %ds timeout", len(timeout_indices), retry_timeout_sec)
                 config = get_config()
                 with ThreadPoolExecutor(max_workers=min(max_workers, len(timeout_indices))) as executor:
                     futures = {
@@ -627,8 +672,11 @@ def run_ragas_evaluation(
                             if outcome is not None:
                                 (_i, question, ground_truth, context_list, answer, status, duration, error_msg) = outcome
                                 results_by_index[idx] = (question, ground_truth, context_list, answer, status, duration, error_msg)
-                        except (FuturesTimeoutError, Exception):
-                            pass
+                        except FuturesTimeoutError:
+                            logger.warning("Item %d timed out again after %ds", idx, retry_timeout_sec)
+                        except Exception as exc:
+                            logger.exception("Item %d failed on retry: %s", idx, exc)
+                st.subheader("📋 Per-item evaluation report")
                 report_placeholder.dataframe(
                     _report_rows_from_results(results_by_index),
                     width="stretch",
@@ -640,31 +688,30 @@ def run_ragas_evaluation(
                 st.error("No valid data generated for evaluation")
                 _clear_ragas_eval_state()
                 return None, None, None
-            st.info("⏳ **In progress:** Computing RAGAS metrics (faithfulness, context recall, context precision, answer relevancy)...")
+            _update_progress_ui(
+                len(results_by_index),
+                stage="Computing RAGAS metrics (faithfulness, context recall, context precision, answer relevancy)…",
+            )
+            logger.info("All %d items processed — computing RAGAS metrics", n_total)
             result, questions = _build_ragas_from_results(results_by_index, indices, get_config)
             counts = _counts_by_status(results_by_index, indices)
-            success_count = counts["success"]
-            partial_count = counts["partial"]
-            failed_count = counts["failed"]
-            timeout_count = counts["timeout"]
             if result is not None:
-                parts = [f"**Per-item:** {success_count}/{n_total} succeeded"]
-                if partial_count:
-                    parts.append(f"{partial_count} partial (retrieval failed)")
-                if failed_count:
-                    parts.append(f"{failed_count} failed")
-                if timeout_count:
-                    parts.append(f"{timeout_count} timeout")
+                parts = [f"**Per-item:** {counts['success']}/{n_total} succeeded"]
+                if counts["partial"]:
+                    parts.append(f"{counts['partial']} partial (retrieval failed)")
+                if counts["failed"]:
+                    parts.append(f"{counts['failed']} failed")
+                if counts["timeout"]:
+                    parts.append(f"{counts['timeout']} timeout")
                 parts.append("**RAGAS metrics computed.** You can download results below.")
-                st.success(" ".join(parts))
+                st.success(" · ".join(parts))
+                logger.info("RAGAS metrics computed — %d succeeded, %d partial, %d failed, %d timeout",
+                            counts["success"], counts["partial"], counts["failed"], counts["timeout"])
             _clear_ragas_eval_state()
             return (result, questions, None)
 
-        # Run for up to TIMESLICE_SEC seconds so UI can show progress and Stop button
+        # Run for up to TIMESLICE_SEC seconds, then return so UI can process Stop
         TIMESLICE_SEC = 20
-        st.subheader("📋 Per-item evaluation report")
-        progress_placeholder = st.empty()
-        report_placeholder = st.empty()
         slice_start = time.time()
         while pending and (time.time() - slice_start) < TIMESLICE_SEC:
             if _shutdown_requested:
@@ -712,187 +759,29 @@ def run_ragas_evaluation(
                         )
 
             completed = len(results_by_index)
-            progress_placeholder.progress(completed / n_total)
+            remaining_count = len(pending)
+            _update_progress_ui(
+                completed,
+                stage=f"Processing items ({remaining_count} remaining, batch size {len(batch_indices)})",
+            )
+            if results_by_index:
+                st.subheader("📋 Per-item evaluation report")
             report_placeholder.dataframe(
                 _report_rows_from_results(results_by_index),
                 width="stretch",
                 height=min(400, 50 * completed),
             )
+            logger.info("Batch complete — %d/%d items done, %d remaining", completed, n_total, remaining_count)
             st.session_state.ragas_eval_pending = pending
             st.session_state.ragas_eval_results = results_by_index
 
-        # Return in_progress so UI shows Continue / Stop
+        # Return in_progress so UI auto-reruns and shows Stop button
         return None, None, "in_progress"
 
-    # ----- Normal (non-chunked) mode: run to completion or until Ctrl+C -----
-    st.subheader("📋 Per-item evaluation report")
-    progress_placeholder = st.empty()
-    report_placeholder = st.empty()
-
-    indices = list(range(n_total))
-    results_by_index: Dict[int, Tuple[str, str, List[str], str, str, float, Optional[str]]] = {}
-    pending = list(indices)
-
-    while pending:
-        if _shutdown_requested:
-            st.warning("Stopped by user (Ctrl+C).")
-            if results_by_index:
-                ind = sorted(results_by_index.keys())
-                result, qs = _build_ragas_from_results(results_by_index, ind, get_config)
-                return (result, qs, "partial_stopped")
-            return None, None, "partial_stopped"
-        batch_indices = pending[:max_workers]
-        pending = pending[max_workers:]
-        config = get_config()
-
-        with ThreadPoolExecutor(max_workers=len(batch_indices)) as executor:
-            futures = {
-                executor.submit(_process_one_item, i, test_data[i], config): i
-                for i in batch_indices
-            }
-            for future in futures:
-                if _shutdown_requested:
-                    st.warning("Stopped by user (Ctrl+C).")
-                    if results_by_index:
-                        ind = sorted(results_by_index.keys())
-                        result, qs = _build_ragas_from_results(results_by_index, ind, get_config)
-                        return (result, qs, "partial_stopped")
-                    return None, None, "partial_stopped"
-                idx = futures[future]
-                try:
-                    # Wait in short chunks so Ctrl+C is respected within a few seconds
-                    remaining = item_timeout_sec
-                    outcome = None
-                    while remaining > 0:
-                        if _shutdown_requested:
-                            st.warning("Stopped by user (Ctrl+C).")
-                            if results_by_index:
-                                ind = sorted(results_by_index.keys())
-                                result, qs = _build_ragas_from_results(results_by_index, ind, get_config)
-                                return (result, qs, "partial_stopped")
-                            return None, None, "partial_stopped"
-                        chunk = min(3, remaining)
-                        try:
-                            outcome = future.result(timeout=chunk)
-                            break
-                        except FuturesTimeoutError:
-                            remaining -= chunk
-                    if outcome is None:
-                        raise FuturesTimeoutError()
-                    (
-                        _i, question, ground_truth, context_list, answer,
-                        status, duration, error_msg
-                    ) = outcome
-                    results_by_index[idx] = (
-                        question, ground_truth, context_list, answer, status, duration, error_msg
-                    )
-                except FuturesTimeoutError:
-                    results_by_index[idx] = _placeholder_item_result(
-                        test_data[idx], "timeout", float(item_timeout_sec),
-                        f"Item did not complete within {item_timeout_sec}s",
-                    )
-                    logger.warning(f"Item {idx} timed out after {item_timeout_sec}s")
-                except Exception as e:
-                    results_by_index[idx] = _placeholder_item_result(
-                        test_data[idx], "failed", 0.0, str(e),
-                    )
-                    logger.exception(f"Item {idx} failed: {e}")
-
-        # Build report from all completed items and update UI
-        completed = len(results_by_index)
-        progress_placeholder.progress(completed / n_total)
-        report_placeholder.dataframe(
-            _report_rows_from_results(results_by_index),
-            width="stretch",
-            height=min(400, 50 * completed),
-        )
-
-    # Retry timed-out items once with 2× timeout
-    timeout_indices = [i for i in indices if results_by_index[i][_STATUS_IDX] == "timeout"]
-    if timeout_indices and not _shutdown_requested:
-        retry_timeout_sec = item_timeout_sec * 2
-        st.info(f"🔄 Retrying {len(timeout_indices)} timed-out item(s) with {retry_timeout_sec}s timeout…")
-        config = get_config()
-        with ThreadPoolExecutor(max_workers=min(max_workers, len(timeout_indices))) as executor:
-            futures = {
-                executor.submit(_process_one_item, i, test_data[i], config): i
-                for i in timeout_indices
-            }
-            for future in futures:
-                if _shutdown_requested:
-                    st.warning("Stopped by user (Ctrl+C).")
-                    ind = sorted(results_by_index.keys())
-                    result, qs = _build_ragas_from_results(results_by_index, ind, get_config)
-                    return (result, qs, "partial_stopped")
-                idx = futures[future]
-                try:
-                    remaining = retry_timeout_sec
-                    outcome = None
-                    while remaining > 0:
-                        if _shutdown_requested:
-                            st.warning("Stopped by user (Ctrl+C).")
-                            ind = sorted(results_by_index.keys())
-                            result, qs = _build_ragas_from_results(results_by_index, ind, get_config)
-                            return (result, qs, "partial_stopped")
-                        chunk = min(3, remaining)
-                        try:
-                            outcome = future.result(timeout=chunk)
-                            break
-                        except FuturesTimeoutError:
-                            remaining -= chunk
-                    if outcome is not None:
-                        (
-                            _i, question, ground_truth, context_list, answer,
-                            status, duration, error_msg
-                        ) = outcome
-                        results_by_index[idx] = (
-                            question, ground_truth, context_list, answer, status, duration, error_msg
-                        )
-                        if status == "success":
-                            logger.info(f"Item {idx} succeeded on retry")
-                    else:
-                        logger.warning(f"Item {idx} timed out again after {retry_timeout_sec}s")
-                except FuturesTimeoutError:
-                    logger.warning(f"Item {idx} timed out again after {retry_timeout_sec}s")
-                except Exception as e:
-                    logger.exception(f"Item {idx} failed on retry: {e}")
-        # Refresh report after retries
-        report_placeholder.dataframe(
-            _report_rows_from_results(results_by_index),
-            width="stretch",
-            height=min(400, 50 * len(results_by_index)),
-        )
-
-    if not results_by_index:
-        st.error("No valid data generated for evaluation")
-        return None, None, None
-
-    counts = _counts_by_status(results_by_index, indices)
-    success_count = counts["success"]
-    partial_count = counts["partial"]
-    failed_count = counts["failed"]
-    timeout_count = counts["timeout"]
-
-    # RAGAS evaluate with fresh Bedrock clients on retry
-    st.info("⏳ **In progress:** Computing RAGAS metrics (faithfulness, context recall, context precision, answer relevancy)...")
-    result, questions_out = _build_ragas_from_results(results_by_index, indices, get_config)
-
-    if result is None and questions_out is None:
-        return None, None, None
-
-    # Success only after RAGAS metrics have been computed
-    if result is not None:
-        parts = [f"**Per-item:** {success_count}/{n_total} succeeded"]
-        if partial_count:
-            parts.append(f"{partial_count} partial (retrieval failed)")
-        if failed_count:
-            parts.append(f"{failed_count} failed")
-        if timeout_count:
-            parts.append(f"{timeout_count} timeout")
-        parts.append("**RAGAS metrics computed.** You can download results below.")
-        st.success(" ".join(parts))
-
-    return result, questions_out, None
+    # If we reach here, ragas_eval_phase was not "running" — should not happen
+    # since the UI always sets it before calling this function.
+    st.error("Unexpected state: evaluation was called without initializing chunked mode.")
+    return None, None, None
 
 def test_api_connection(api_url: str, bearer_token: str, tenant: str, 
                        knowledge_base_name: str, model: str = None) -> Dict[str, Any]:

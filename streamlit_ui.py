@@ -222,22 +222,14 @@ class StreamlitUI:
             self._render_stored_results(stored_df, meta)
             return
 
-        st.info(f"📊 Ready to evaluate {n_total} test cases")
-
-        # Evaluation in progress (chunked mode): show progress and Continue / Stop
+        # Evaluation in progress (chunked mode): auto-run next batch, show Stop button
         if st.session_state.get("ragas_eval_phase") == "running":
             eval_results = st.session_state.get("ragas_eval_results") or {}
-            eval_pending = st.session_state.get("ragas_eval_pending") or []
             eval_stopped = st.session_state.get("ragas_eval_stopped", False)
             eval_test_data = st.session_state.get("ragas_eval_test_data") or test_data
             completed = len(eval_results)
 
-            st.markdown(f"**Progress:** {completed} / {n_total} items evaluated")
-            if completed < n_total:
-                st.progress(completed / n_total if n_total else 0)
-
             if eval_stopped:
-                # User clicked Stop: run evaluation once to build partial and return
                 with st.spinner("Preparing partial results…"):
                     try:
                         result, _eval_data, status = evaluation_func(eval_test_data, get_config)
@@ -249,31 +241,32 @@ class StreamlitUI:
                     except Exception as e:
                         st.error(f"❌ Failed to build partial results: {e}")
                         st.exception(e)
-            else:
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("▶️ Continue evaluation", type="primary", key="eval_continue_btn"):
-                        with st.spinner("🔄 Running next batch…"):
-                            try:
-                                result, _eval_data, status = evaluation_func(eval_test_data, get_config)
-                                if status == "in_progress":
-                                    st.rerun()
-                                elif status == "partial_stopped" and result is not None:
-                                    _, _, _, kb_name, mid, emb_id = get_config()
-                                    self._render_results(result, kb_name, mid, emb_id, partial=True)
-                                elif status is None and result is not None:
-                                    _, _, _, kb_name, mid, emb_id = get_config()
-                                    self._render_results(result, kb_name, mid, emb_id)
-                                elif status == "partial_stopped":
-                                    st.warning("Evaluation stopped. No completed items to show.")
-                            except Exception as e:
-                                st.error(f"❌ Evaluation failed: {e}")
-                                st.exception(e)
-                with col2:
-                    if st.button("⏹️ Stop evaluation", key="eval_stop_btn"):
-                        st.session_state.ragas_eval_stopped = True
-                        st.rerun()
+                return
+
+            # Show Stop button (rendered before auto-run so it's visible)
+            if st.button("⏹️ Stop evaluation", key="eval_stop_btn"):
+                st.session_state.ragas_eval_stopped = True
+                st.rerun()
+
+            # Auto-run next batch (progress bar and detailed status are rendered inside evaluation_func)
+            try:
+                result, _eval_data, status = evaluation_func(eval_test_data, get_config)
+                if status == "in_progress":
+                    st.rerun()
+                elif status == "partial_stopped" and result is not None:
+                    _, _, _, kb_name, mid, emb_id = get_config()
+                    self._render_results(result, kb_name, mid, emb_id, partial=True)
+                elif status is None and result is not None:
+                    _, _, _, kb_name, mid, emb_id = get_config()
+                    self._render_results(result, kb_name, mid, emb_id)
+                elif status == "partial_stopped":
+                    st.warning("Evaluation stopped. No completed items to show.")
+            except Exception as e:
+                st.error(f"❌ Evaluation failed: {e}")
+                st.exception(e)
             return
+
+        st.info(f"📊 Ready to evaluate {n_total} test cases")
 
         if st.button("🚀 Start RAGAS Evaluation", type="primary"):
             api_url, bearer_token, tenant, knowledge_base_name, model_id, embedding_model_id = get_config()
@@ -292,24 +285,30 @@ class StreamlitUI:
             st.session_state.ragas_eval_test_data = test_data
             st.session_state.ragas_eval_stopped = False
 
-            with st.spinner("🔄 Running RAGAS evaluation... This may take several minutes."):
-                try:
-                    result, _eval_data, status = evaluation_func(test_data, get_config)
-                    if status == "in_progress":
-                        st.rerun()
-                    elif result is not None:
-                        _, _, _, kb_name, mid, emb_id = get_config()
-                        self._render_results(result, kb_name, mid, emb_id, partial=(status == "partial_stopped"))
-                    elif status == "partial_stopped":
-                        st.warning("Evaluation stopped by user. No completed items to show.")
-                    else:
-                        st.error("❌ Evaluation completed but no results were generated.")
-                except Exception as e:
-                    st.error(f"❌ Evaluation failed: {e}")
-                    st.exception(e)
+            try:
+                result, _eval_data, status = evaluation_func(test_data, get_config)
+                if status == "in_progress":
+                    st.rerun()
+                elif result is not None:
+                    _, _, _, kb_name, mid, emb_id = get_config()
+                    self._render_results(result, kb_name, mid, emb_id, partial=(status == "partial_stopped"))
+                elif status == "partial_stopped":
+                    st.warning("Evaluation stopped by user. No completed items to show.")
+                else:
+                    st.error("❌ Evaluation completed but no results were generated.")
+            except Exception as e:
+                st.error(f"❌ Evaluation failed: {e}")
+                st.exception(e)
 
     def _render_results(self, result, knowledge_base_name, model_id, embedding_model_id, partial: bool = False):
         """Build results DataFrame from RAGAS result, persist to session state, then render download + table."""
+        # Clear chunked-eval state so it doesn't persist into the next rerun
+        for key in (
+            "ragas_eval_phase", "ragas_eval_pending", "ragas_eval_results",
+            "ragas_eval_test_data", "ragas_eval_stopped",
+            "ragas_eval_start_time", "ragas_eval_stage",
+        ):
+            st.session_state.pop(key, None)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         results_df = result.to_pandas().copy()
         results_df["evaluation_timestamp"] = timestamp
