@@ -67,6 +67,29 @@ for _name in (
 logger = logging.getLogger(__name__)
 logger.setLevel(_LOG_LEVEL)
 
+# Reduce Bedrock/LangChain console noise: INFO and their ERROR tracebacks (we handle and log errors ourselves)
+logging.getLogger("langchain_aws").setLevel(logging.CRITICAL)
+
+EXPIRED_TOKEN_MESSAGE = (
+    "AWS security token expired. Refresh your credentials (e.g. run 'aws sso login' or refresh your session) and try again."
+)
+
+def _is_expired_token(e: Exception) -> bool:
+    """True if e is botocore ClientError with ExpiredTokenException."""
+    try:
+        from botocore.exceptions import ClientError
+        return (
+            isinstance(e, ClientError)
+            and e.response.get("Error", {}).get("Code") == "ExpiredTokenException"
+        )
+    except ImportError:
+        s = str(e).lower()
+        return "ExpiredTokenException" in str(e) or ("security token" in s and "expired" in s)
+
+def _format_bedrock_error(e: Exception) -> str:
+    """User-friendly message for Bedrock errors; avoids long tracebacks for expired token."""
+    return EXPIRED_TOKEN_MESSAGE if _is_expired_token(e) else str(e)
+
 class Document:
     """Represents a document with content and metadata"""
     def __init__(self, page_content: str, metadata: Optional[Dict[str, Any]] = None):
@@ -369,8 +392,11 @@ def _process_one_item(
     except Exception as e:
         answer = "Unable to generate answer from available context."
         status = "failed"
-        error_msg = str(e)
-        logger.warning(f"Item {index} answer generation failed: {e}")
+        error_msg = _format_bedrock_error(e)
+        if _is_expired_token(e):
+            logger.error("Item %s: %s", index, EXPIRED_TOKEN_MESSAGE)
+        else:
+            logger.warning(f"Item {index} answer generation failed: {e}")
 
     duration = time.time() - start
     return (index, question, ground_truth, context_list, answer, status, duration, error_msg)
@@ -605,6 +631,10 @@ def run_ragas_evaluation(
             )
             break
         except Exception as e:
+            if _is_expired_token(e):
+                st.error(f"❌ {EXPIRED_TOKEN_MESSAGE}")
+                logger.error(EXPIRED_TOKEN_MESSAGE)
+                return None, None
             if attempt == MAX_RETRIES - 1:
                 st.error(f"Evaluation failed after {MAX_RETRIES} attempts: {e}")
                 logger.error(f"Evaluation failed: {e}", exc_info=True)
@@ -747,13 +777,17 @@ def test_bedrock_connection(model_id: str, embedding_model_id: str) -> Dict[str,
             "init_time": f"{elapsed_time:.2f}s"
         }
     except Exception as e:
-        llm_test["error"] = str(e)
+        err_msg = _format_bedrock_error(e)
+        llm_test["error"] = err_msg
         result["details"]["llm"] = {
             "model_id": model_id,
             "status": "❌ Failed",
-            "error": str(e)[:200]
+            "error": err_msg[:200]
         }
-        logger.error(f"LLM test error: {e}", exc_info=True)
+        if _is_expired_token(e):
+            logger.error("LLM test: %s", EXPIRED_TOKEN_MESSAGE)
+        else:
+            logger.error(f"LLM test error: {e}", exc_info=True)
     
     # Test Embedding connection (BedrockEmbeddings imported above)
     try:
@@ -771,13 +805,17 @@ def test_bedrock_connection(model_id: str, embedding_model_id: str) -> Dict[str,
             "init_time": f"{elapsed_time:.2f}s"
         }
     except Exception as e:
-        embedding_test["error"] = str(e)
+        err_msg = _format_bedrock_error(e)
+        embedding_test["error"] = err_msg
         result["details"]["embedding"] = {
             "model_id": embedding_model_id,
             "status": "❌ Failed",
-            "error": str(e)[:200]
+            "error": err_msg[:200]
         }
-        logger.error(f"Embedding test error: {e}", exc_info=True)
+        if _is_expired_token(e):
+            logger.error("Embedding test: %s", EXPIRED_TOKEN_MESSAGE)
+        else:
+            logger.error(f"Embedding test error: {e}", exc_info=True)
     
     # Overall result
     if llm_test["success"] and embedding_test["success"]:
