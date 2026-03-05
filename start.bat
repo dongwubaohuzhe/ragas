@@ -76,6 +76,14 @@ echo.
 
 REM Activate virtual environment and run streamlit directly
 call .venv\Scripts\activate.bat
+
+REM Load optional environment variables from .env (e.g. AWS_PROFILE, AWS_DEFAULT_PROFILE)
+if exist ".env" (
+    echo Loading environment from .env...
+    for /f "usebackq eol=# tokens=1,* delims==" %%a in (".env") do set "%%a=%%b"
+    echo.
+)
+
 streamlit run streamlit_ragas_eval.py
 
 REM If streamlit exits, keep the window open to see any error messages

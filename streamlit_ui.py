@@ -4,7 +4,7 @@ Streamlit UI components for RAGAS Evaluation Tool
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-from typing import Optional, List, Dict, Tuple, Callable
+from typing import Optional, List, Dict, Tuple, Callable, Any
 import io
 from config import (
     DEFAULT_API_URL,
@@ -28,23 +28,20 @@ class StreamlitUI:
         st.sidebar.header("⚙️ Configuration")
         
         # Initialize session state for form values if not present
-        if 'sidebar_api_url' not in st.session_state:
-            st.session_state.sidebar_api_url = self.api_url
-        if 'sidebar_bearer_token' not in st.session_state:
-            st.session_state.sidebar_bearer_token = ""
-        if 'sidebar_tenant' not in st.session_state:
-            st.session_state.sidebar_tenant = self.tenant
-        if 'sidebar_kb_name' not in st.session_state:
-            st.session_state.sidebar_kb_name = self.knowledge_base_name
-        if 'sidebar_model_id' not in st.session_state:
-            st.session_state.sidebar_model_id = DEFAULT_LLM_MODEL_ID
-        if 'sidebar_embedding_id' not in st.session_state:
-            st.session_state.sidebar_embedding_id = DEFAULT_EMBEDDING_MODEL_ID
-        if 'sidebar_max_workers' not in st.session_state:
-            st.session_state.sidebar_max_workers = DEFAULT_MAX_WORKERS
-        if 'sidebar_item_timeout' not in st.session_state:
-            st.session_state.sidebar_item_timeout = DEFAULT_ITEM_TIMEOUT
-        
+        _sidebar_defaults = {
+            "sidebar_api_url": self.api_url,
+            "sidebar_bearer_token": "",
+            "sidebar_tenant": self.tenant,
+            "sidebar_kb_name": self.knowledge_base_name,
+            "sidebar_model_id": DEFAULT_LLM_MODEL_ID,
+            "sidebar_embedding_id": DEFAULT_EMBEDDING_MODEL_ID,
+            "sidebar_max_workers": DEFAULT_MAX_WORKERS,
+            "sidebar_item_timeout": DEFAULT_ITEM_TIMEOUT,
+        }
+        for key, default in _sidebar_defaults.items():
+            if key not in st.session_state:
+                st.session_state[key] = default
+
         api_url = st.sidebar.text_input("API URL", value=st.session_state.sidebar_api_url, key="sidebar_api_url_input")
         bearer_token = st.sidebar.text_input("Bearer Token", type="password", value=st.session_state.sidebar_bearer_token, key="sidebar_bearer_token_input")
         tenant = st.sidebar.text_input("Tenant", value=st.session_state.sidebar_tenant, key="sidebar_tenant_input")
@@ -114,14 +111,14 @@ class StreamlitUI:
    
     def render_file_upload(self) -> Optional[List[Dict[str, str]]]:
         """
-        Render file upload component for test plan CSV
-        
+        Render file upload component for test plan CSV.
+        User can select which columns to use as question and ground_truth if names differ.
         Returns:
-            List of dictionaries with test data or None
+            List of dicts with keys 'question' and 'ground_truth' for evaluation.
         """
         st.header("1. Upload Test Plan")
-        st.info("📄 CSV Format: Must contain 'question' and 'ground_truth' columns")
-        uploaded_file = st.file_uploader("Choose CSV file", type=["csv"], help="Upload a CSV file with 'question' and 'ground_truth' columns")
+        st.info("📄 Upload a CSV with at least two columns. Choose which column is the **question** and which is the **ground truth**.")
+        uploaded_file = st.file_uploader("Choose CSV file", type=["csv"], help="CSV with your test cases")
        
         if uploaded_file is not None:
             try:
@@ -131,23 +128,68 @@ class StreamlitUI:
                     return None
                 # Normalize column names: strip and lowercase for flexible matching
                 df.columns = df.columns.str.strip().str.lower()
-                st.success(f"✅ Loaded {len(df)} questions from test plan")
-                st.dataframe(df.head(), width='stretch')
-                # Validate required columns (after normalizing)
-                required_columns = {'question', 'ground_truth'}
-                if not required_columns.issubset(df.columns):
-                    missing = required_columns - set(df.columns)
-                    st.error(f"❌ CSV must contain 'question' and 'ground_truth' columns. Missing: {', '.join(missing)}")
+                cols = df.columns.tolist()
+                if len(cols) < 2:
+                    st.error("❌ CSV must have at least two columns (e.g. question and answer/ground truth).")
                     return None
-                # Check for empty rows
-                if df['question'].isna().any() or df['ground_truth'].isna().any():
-                    st.warning("⚠️ Some rows have empty questions or ground_truth values. These will be skipped.")
-                return df.to_dict('records')
+                st.success(f"✅ Loaded {len(df)} rows from {uploaded_file.name}")
+                st.dataframe(df.head(), width="stretch")
+
+                # Column mapping: default to 'question' / 'ground_truth' if present
+                default_question = "question" if "question" in cols else cols[0]
+                default_ground_truth = "ground_truth" if "ground_truth" in cols else (cols[1] if len(cols) > 1 else cols[0])
+                # Persist selection per file so it doesn’t reset on rerun
+                file_key = f"{uploaded_file.name}_{len(df)}"
+                session_q = st.session_state.get("ragas_question_col", {}).get(file_key, default_question)
+                session_gt = st.session_state.get("ragas_ground_truth_col", {}).get(file_key, default_ground_truth)
+                if session_q not in cols:
+                    session_q = default_question
+                if session_gt not in cols:
+                    session_gt = default_ground_truth
+
+                st.markdown("**Map columns to evaluation fields:**")
+                c1, c2 = st.columns(2)
+                # Key by file so column selection is per-file when user switches files
+                widget_suffix = file_key.replace(" ", "_")
+                with c1:
+                    question_col = st.selectbox(
+                        "Question column",
+                        options=cols,
+                        index=cols.index(session_q) if session_q in cols else 0,
+                        key=f"file_question_col_{widget_suffix}",
+                    )
+                with c2:
+                    ground_truth_col = st.selectbox(
+                        "Ground truth column",
+                        options=cols,
+                        index=cols.index(session_gt) if session_gt in cols else min(1, len(cols) - 1),
+                        key=f"file_ground_truth_col_{widget_suffix}",
+                    )
+                if question_col == ground_truth_col:
+                    st.warning("⚠️ Question and ground truth columns are the same. Consider selecting different columns.")
+                # Store selection for this file
+                if "ragas_question_col" not in st.session_state:
+                    st.session_state.ragas_question_col = {}
+                if "ragas_ground_truth_col" not in st.session_state:
+                    st.session_state.ragas_ground_truth_col = {}
+                st.session_state.ragas_question_col[file_key] = question_col
+                st.session_state.ragas_ground_truth_col[file_key] = ground_truth_col
+
+                # Build test_data with canonical keys 'question' and 'ground_truth'
+                df_mapped = df[[question_col, ground_truth_col]].copy()
+                df_mapped = df_mapped.rename(columns={question_col: "question", ground_truth_col: "ground_truth"})
+                if df_mapped["question"].isna().any() or df_mapped["ground_truth"].isna().any():
+                    st.warning("⚠️ Some rows have empty question or ground_truth values. They will still be included.")
+                st.session_state.ragas_current_file_id = file_key
+                return df_mapped.to_dict("records")
             except Exception as e:
                 st.error(f"❌ Error reading CSV file: {e}")
                 st.info("Please ensure the file is a valid CSV format.")
                 return None
        
+        # No file selected: clear file id so stored results are not tied to a previous file
+        if "ragas_current_file_id" in st.session_state:
+            del st.session_state["ragas_current_file_id"]
         return None
    
     def render_evaluation_section(
@@ -160,10 +202,79 @@ class StreamlitUI:
         Render evaluation section with start button.
         get_config() returns (api_url, bearer_token, tenant, kb_name, model_id, embedding_id)
         so evaluation can read fresh credentials/token on each use and retry.
+        evaluation_func returns (result, questions, status) with status None | "in_progress" | "partial_stopped".
         """
         st.header("2. Run Evaluation")
-        st.info(f"📊 Ready to evaluate {len(test_data)} test cases")
-        
+        n_total = len(test_data)
+        current_file_id = st.session_state.get("ragas_current_file_id")
+
+        # Clear stored results if user loaded a different file
+        last_file_id = st.session_state.get("ragas_last_result_file_id")
+        if last_file_id is not None and current_file_id is not None and last_file_id != current_file_id:
+            for key in ("ragas_last_result_df", "ragas_last_result_meta", "ragas_last_result_file_id"):
+                st.session_state.pop(key, None)
+            last_file_id = None
+
+        # Show retained results from last run (same file still loaded) until user loads a new file
+        if last_file_id is not None and current_file_id == last_file_id and "ragas_last_result_df" in st.session_state:
+            stored_df = st.session_state.ragas_last_result_df
+            meta = st.session_state.get("ragas_last_result_meta") or {}
+            self._render_stored_results(stored_df, meta)
+            return
+
+        st.info(f"📊 Ready to evaluate {n_total} test cases")
+
+        # Evaluation in progress (chunked mode): show progress and Continue / Stop
+        if st.session_state.get("ragas_eval_phase") == "running":
+            eval_results = st.session_state.get("ragas_eval_results") or {}
+            eval_pending = st.session_state.get("ragas_eval_pending") or []
+            eval_stopped = st.session_state.get("ragas_eval_stopped", False)
+            eval_test_data = st.session_state.get("ragas_eval_test_data") or test_data
+            completed = len(eval_results)
+
+            st.markdown(f"**Progress:** {completed} / {n_total} items evaluated")
+            if completed < n_total:
+                st.progress(completed / n_total if n_total else 0)
+
+            if eval_stopped:
+                # User clicked Stop: run evaluation once to build partial and return
+                with st.spinner("Preparing partial results…"):
+                    try:
+                        result, _eval_data, status = evaluation_func(eval_test_data, get_config)
+                        if status == "partial_stopped" and result is not None:
+                            _, _, _, kb_name, mid, emb_id = get_config()
+                            self._render_results(result, kb_name, mid, emb_id, partial=True)
+                        elif status == "partial_stopped":
+                            st.warning("Evaluation stopped by user. No items had completed yet.")
+                    except Exception as e:
+                        st.error(f"❌ Failed to build partial results: {e}")
+                        st.exception(e)
+            else:
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("▶️ Continue evaluation", type="primary", key="eval_continue_btn"):
+                        with st.spinner("🔄 Running next batch…"):
+                            try:
+                                result, _eval_data, status = evaluation_func(eval_test_data, get_config)
+                                if status == "in_progress":
+                                    st.rerun()
+                                elif status == "partial_stopped" and result is not None:
+                                    _, _, _, kb_name, mid, emb_id = get_config()
+                                    self._render_results(result, kb_name, mid, emb_id, partial=True)
+                                elif status is None and result is not None:
+                                    _, _, _, kb_name, mid, emb_id = get_config()
+                                    self._render_results(result, kb_name, mid, emb_id)
+                                elif status == "partial_stopped":
+                                    st.warning("Evaluation stopped. No completed items to show.")
+                            except Exception as e:
+                                st.error(f"❌ Evaluation failed: {e}")
+                                st.exception(e)
+                with col2:
+                    if st.button("⏹️ Stop evaluation", key="eval_stop_btn"):
+                        st.session_state.ragas_eval_stopped = True
+                        st.rerun()
+            return
+
         if st.button("🚀 Start RAGAS Evaluation", type="primary"):
             api_url, bearer_token, tenant, knowledge_base_name, model_id, embedding_model_id = get_config()
             if not all([api_url, bearer_token, tenant, knowledge_base_name]):
@@ -173,37 +284,67 @@ class StreamlitUI:
                 ) if not value]
                 st.error(f"❌ Please fill in all configuration fields. Missing: {', '.join(missing)}")
                 return
-           
+
+            # Start chunked evaluation: set state so first run enters chunked mode
+            st.session_state.ragas_eval_phase = "running"
+            st.session_state.ragas_eval_pending = list(range(n_total))
+            st.session_state.ragas_eval_results = {}
+            st.session_state.ragas_eval_test_data = test_data
+            st.session_state.ragas_eval_stopped = False
+
             with st.spinner("🔄 Running RAGAS evaluation... This may take several minutes."):
                 try:
-                    result, evaluation_data = evaluation_func(test_data, get_config)
-                    if result is not None:
-                        # Use current config for result labels
+                    result, _eval_data, status = evaluation_func(test_data, get_config)
+                    if status == "in_progress":
+                        st.rerun()
+                    elif result is not None:
                         _, _, _, kb_name, mid, emb_id = get_config()
-                        self._render_results(result, kb_name, mid, emb_id)
+                        self._render_results(result, kb_name, mid, emb_id, partial=(status == "partial_stopped"))
+                    elif status == "partial_stopped":
+                        st.warning("Evaluation stopped by user. No completed items to show.")
                     else:
                         st.error("❌ Evaluation completed but no results were generated.")
                 except Exception as e:
                     st.error(f"❌ Evaluation failed: {e}")
                     st.exception(e)
-   
-    def _render_results(self, result, knowledge_base_name, model_id, embedding_model_id):
-        st.success("Evaluation completed!")
-       
-        st.header("3. Download Results")
+
+    def _render_results(self, result, knowledge_base_name, model_id, embedding_model_id, partial: bool = False):
+        """Build results DataFrame from RAGAS result, persist to session state, then render download + table."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"ragas_evaluation_{knowledge_base_name}_{timestamp}.csv"
-       
-        results_df = result.to_pandas()
-       
-        results_df['evaluation_timestamp'] = timestamp
-        results_df['knowledge_base_name'] = knowledge_base_name
-        results_df['model_id'] = model_id
-        results_df['embedding_model_id'] = embedding_model_id
-       
+        results_df = result.to_pandas().copy()
+        results_df["evaluation_timestamp"] = timestamp
+        results_df["knowledge_base_name"] = knowledge_base_name
+        results_df["model_id"] = model_id
+        results_df["embedding_model_id"] = embedding_model_id
+        meta = {
+            "partial": partial,
+            "knowledge_base_name": knowledge_base_name,
+            "model_id": model_id,
+            "embedding_model_id": embedding_model_id,
+            "timestamp": timestamp,
+        }
+        st.session_state.ragas_last_result_df = results_df
+        st.session_state.ragas_last_result_meta = meta
+        st.session_state.ragas_last_result_file_id = st.session_state.get("ragas_current_file_id")
+        self._render_results_ui(results_df, meta)
+
+    def _render_results_ui(self, results_df: pd.DataFrame, meta: Dict[str, Any]) -> None:
+        """Render success/partial message, download button, and results table (shared by fresh and stored results)."""
+        partial = meta.get("partial", False)
+        if partial:
+            st.warning(
+                "⏹️ **Evaluation stopped by user.** Partial results are shown below. "
+                "You can download the evaluation file with whatever was evaluated up to that point."
+            )
+        else:
+            st.success("Evaluation completed!")
+        st.header("3. Download Results")
+        kb_name = meta.get("knowledge_base_name", "")
+        timestamp = meta.get("timestamp", datetime.now().strftime("%Y%m%d_%H%M%S"))
+        suffix = "_partial" if partial else ""
+        filename = f"ragas_evaluation_{kb_name}_{timestamp}{suffix}.csv"
         csv_buffer = io.StringIO()
         results_df.to_csv(csv_buffer, index=False)
-       
         st.download_button(
             "Download Results CSV",
             csv_buffer.getvalue(),
@@ -211,9 +352,12 @@ class StreamlitUI:
             "text/csv",
             key="download_ragas_results_csv",
         )
-       
         st.info(f"Results saved with {len(results_df)} evaluations")
         st.dataframe(results_df)
+
+    def _render_stored_results(self, stored_df: pd.DataFrame, meta: Dict[str, Any]) -> None:
+        """Render results UI from stored session state (retained until user loads a new file)."""
+        self._render_results_ui(stored_df, meta)
    
     def _render_connection_tests(self, api_url: str, bearer_token: str, tenant: str,
                                  knowledge_base_name: str, model_id: str, embedding_model_id: str) -> None:
@@ -314,7 +458,7 @@ class StreamlitUI:
         st.sidebar.markdown("---")
         with st.sidebar.expander("📋 Instructions"):
             st.markdown("""
-            1. Upload Test Plan (csv) with 'question' and 'ground_truth' columns
+            1. Upload Test Plan (CSV), then choose question and ground truth columns
             2. Configure API settings and models
             3. Run evaluation
             4. Download results (csv) with timestamp

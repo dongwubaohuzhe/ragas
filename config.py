@@ -4,9 +4,8 @@ Configuration constants for RAGAS Evaluation Tool
 import os
 import urllib3  # type: ignore[import-untyped]
 
-# AWS Bedrock Configuration
-AWS_REGION = os.getenv("AWS_REGION", "us-gov-west-1")
-AWS_REGION_NAME = "us-gov-west-1"  # Default region
+# AWS Bedrock Configuration (region for Bedrock client)
+AWS_REGION_NAME = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-gov-west-1"))
 
 # API Configuration
 DEFAULT_API_URL = "https://api.url.com/chat"

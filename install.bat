@@ -29,7 +29,7 @@ if %errorlevel% equ 0 (
     py -3.12 -m uv --version
     echo.
     echo Running uv sync to install project dependencies...
-    py -3.12 -m uv sync
+    py -3.12 -m uv sync --no-install-project
     goto :end
 )
 
@@ -40,7 +40,7 @@ if %errorlevel% equ 0 (
     python -m uv --version
     echo.
     echo Running uv sync to install project dependencies...
-    python -m uv sync
+    python -m uv sync --no-install-project
     goto :end
 )
 

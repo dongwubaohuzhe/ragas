@@ -1,6 +1,4 @@
-
-
-"""Model configuration for different Bedrock models"""
+"""Model configuration for different Bedrock models."""
 
 # Ordered list of supported LLM model IDs (for UI dropdowns)
 SUPPORTED_LLM_MODEL_IDS = [
@@ -46,8 +44,8 @@ SUPPORTED_EMBEDDINGS = [
     "cohere.embed-multilingual-v3"
 ]
 
-def get_model_config(model_id):
-    """Get configuration for a specific model"""
+def get_model_config(model_id: str) -> dict:
+    """Return configuration for a specific Bedrock model (type, kwargs)."""
     return SUPPORTED_MODELS.get(
         model_id,
         {"type": "default", "kwargs": {"temperature": 0.1, "max_tokens": 1000}},

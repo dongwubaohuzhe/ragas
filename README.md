@@ -8,8 +8,10 @@ Automated testing framework for RAGAS (Retrieval Augmented Generation Assessment
 - Generation quality assessment
 - Automated evaluation metrics (Faithfulness, Context Recall, Context Precision, Answer Relevancy)
 - Performance benchmarking
-- CSV-based test plan upload
-- Configurable model selection
+- CSV-based test plan upload with **column mapping** (choose which columns are question and ground truth)
+- **Stop evaluation** from the UI; download partial results when stopped
+- Results retained until you load a different file
+- Configurable model selection and evaluation options (parallelism, timeout)
 
 ## Architecture
 
@@ -28,7 +30,7 @@ The application requires **two separate connections**:
 
 ### Connection 2: Amazon Bedrock (LLM & Embeddings)
 - **Type**: Direct AWS Bedrock connection via `boto3`/`langchain`
-- **Region**: `us-gov-west-1` (AWS GovCloud)
+- **Region**: Configurable via `AWS_REGION` or `AWS_DEFAULT_REGION` (default `us-gov-west-1`)
 - **Purpose**: 
   1. **Answer Generation**: Uses `BedrockChat` to generate answers from retrieved context
   2. **RAGAS Evaluation**: Uses `BedrockChat` for running evaluation metrics
@@ -57,7 +59,7 @@ The application requires **two separate connections**:
 
 1. **Python 3.12+** (required for UV installation)
 2. **UV** - Fast Python package manager
-   - Auto-installed by `install.bat`
+   - Auto-installed by `install.bat` (Windows) or `install.sh` (Mac/Unix)
    - Or install manually: https://github.com/astral-sh/uv
 3. **AWS Credentials** configured for Bedrock access
    - Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
@@ -75,13 +77,17 @@ The application requires **two separate connections**:
 
 **UV** is a fast Python package manager that automatically resolves dependencies without version conflicts.
 
-**Quick Setup:**
+**Quick Setup (Windows):**
 1. Run `install.bat` - This will install UV (if needed) and set up the project automatically
 2. Run `start.bat` to launch the application
 
-**Alternative:** If UV is already installed, you can use `uv-install.bat` which only syncs dependencies.
+**Quick Setup (Mac/Unix):**
+1. Run `./install.sh` - This will install UV (if needed) and set up the project automatically
+2. Run `./start.sh` to launch the application
 
-**Manual UV Setup:**
+**Alternative:** If UV is already installed, use `uv-install.bat` (Windows) or `./uv-install.sh` (Mac/Unix) to only sync dependencies.
+
+**Manual UV Setup (Windows):**
 ```bash
 # Install UV (if not installed)
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
@@ -91,6 +97,20 @@ uv sync --no-install-project
 
 # Run the application
 uv run streamlit run streamlit_ragas_eval.py
+```
+
+**Manual UV Setup (Mac/Unix):**
+```bash
+# Install UV (if not installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# Ensure ~/.local/bin is in your PATH: export PATH="$HOME/.local/bin:$PATH"
+
+# Install project dependencies
+uv sync --no-install-project
+
+# Run the application
+./start.sh
+# Or: source .venv/bin/activate && streamlit run streamlit_ragas_eval.py
 ```
 
 **Benefits of UV:**
@@ -106,69 +126,71 @@ uv run streamlit run streamlit_ragas_eval.py
 # Windows
 start.bat
 
-# Or manually
+# Mac/Unix
+./start.sh
+
+# Or manually (after activating venv)
 uv run streamlit run streamlit_ragas_eval.py
 ```
+
+On both platforms, `start.bat` / `start.sh` load optional environment variables from a `.env` file (e.g. `AWS_PROFILE`, `AWS_DEFAULT_PROFILE`) after activating the virtual environment. Copy `.env.example` to `.env` and set your values.
 
 ## Configuration
 
 ### Environment Variables (Optional)
 
-Create a `.env` file in the project root with the following variables:
+Copy `.env.example` to `.env` in the project root and set your values. The `.env` file is gitignored.
+
+**Start scripts** (`start.bat` / `start.sh`) load `.env` after activating the virtual environment, so you can set:
 
 ```bash
-# AWS Configuration
+# AWS profile (e.g. after aws sso login) – loaded by start.bat / start.sh
+AWS_PROFILE=your-profile-name
+AWS_DEFAULT_PROFILE=your-profile-name
+```
+
+Other optional variables (see `config.py` and UI defaults):
+
+```bash
+# AWS (region used for Bedrock; credentials from profile or env)
 AWS_REGION=us-gov-west-1
-AWS_ACCESS_KEY_ID=your_access_key_here
-AWS_SECRET_ACCESS_KEY=your_secret_key_here
 
-# API Configuration (optional - can be set in UI)
-API_URL=https://api.url.com/chat
-TENANT=tenant-name
-KNOWLEDGE_BASE_NAME=kb-name
+# API defaults (can also be set in UI)
+# API_URL, TENANT, KNOWLEDGE_BASE_NAME
 
-# SSL Configuration
-# Set to "true" to verify SSL certificates (recommended for production)
+# SSL (set true in production)
 SSL_VERIFY=false
 ```
 
-**Note**: The `.env` file is gitignored for security. Create it manually using the template above.
-
 ### AWS Credentials Setup
 
-The application requires AWS credentials to access Bedrock. Configure using one of these methods:
+The application needs AWS credentials for Bedrock. Recommended: use an **AWS profile** (e.g. SSO) and set it in `.env`:
 
-1. **Environment Variables**:
-   ```bash
-   export AWS_ACCESS_KEY_ID=your_key
-   export AWS_SECRET_ACCESS_KEY=your_secret
-   export AWS_REGION=us-gov-west-1
-   ```
+```bash
+# In .env (loaded by start.bat / start.sh)
+AWS_PROFILE=your-sso-profile
+AWS_DEFAULT_PROFILE=your-sso-profile
+```
 
-2. **AWS Credentials File** (`~/.aws/credentials`):
-   ```ini
-   [default]
-   aws_access_key_id = your_key
-   aws_secret_access_key = your_secret
-   region = us-gov-west-1
-   ```
+Other options:
 
-3. **IAM Role** (if running on EC2/ECS)
+1. **Environment variables**: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_REGION` (default `us-gov-west-1`)
+2. **Credentials file** (`~/.aws/credentials`) with a `[profile]` or default profile
+3. **IAM role** when running on EC2/ECS
 
 ## Usage
 
 ### Step 1: Prepare Test Plan
 
-Create a CSV file with the following columns:
-- `question`: The test question to evaluate
-- `ground_truth`: The expected/correct answer
+Create a CSV file with at least two columns: one for the test question and one for the expected/correct answer. Column names can be anything; after uploading, you choose which column is the **question** and which is the **ground truth**.
 
-**Example CSV format** (see `example_test_plan.csv`):
+**Example CSV format** (see `example_test_plan.csv`). If you name columns `question` and `ground_truth`, they are selected by default:
 ```csv
 question,ground_truth
 What is the purpose of this system?,The system is designed to evaluate RAG applications.
 How do I configure the API?,Configure the API by providing the URL and bearer token.
 ```
+You can use different headers (e.g. `query`, `expected_answer`) and map them in the app.
 
 ### Step 2: Configure Settings
 
@@ -183,19 +205,20 @@ In the sidebar, configure:
 ### Step 3: Upload and Run
 
 1. Upload your test plan CSV file
-2. Verify the loaded data preview
-3. Click "🚀 Start RAGAS Evaluation"
-4. Wait for evaluation to complete (may take several minutes)
+2. Select **Question column** and **Ground truth column** (defaults to `question` / `ground_truth` if present)
+3. Verify the loaded data preview
+4. Click **🚀 Start RAGAS Evaluation**
+5. Evaluation runs in batches; you can click **▶️ Continue evaluation** for the next batch or **⏹️ Stop evaluation** to finish early with partial results
 
 ### Step 4: Download Results
 
-- Results are automatically saved with timestamp
+- When evaluation completes (or after you stop), download the results CSV
+- Results stay on screen until you load a different file
 - Download CSV includes:
-  - All evaluation metrics
-  - Timestamp
-  - Knowledge base name
-  - Model IDs used
-  - Individual question results
+  - All evaluation metrics (faithfulness, context recall, context precision, answer relevancy)
+  - Timestamp, knowledge base name, model IDs
+  - Per-question results
+- If you stopped early, the file is marked `_partial` and contains only the items evaluated up to that point
 
 ## Evaluation Metrics
 
@@ -208,18 +231,17 @@ The tool evaluates RAG systems using four key metrics:
 
 ## Test Plan Format
 
-The test plan CSV must contain exactly two columns:
+The test plan CSV must have **at least two columns**. After upload, you choose which column is the question and which is the ground truth.
 
-| Column | Description | Example |
-|--------|-------------|---------|
-| `question` | The question to test | "What is the purpose of this system?" |
-| `ground_truth` | Expected answer | "The system evaluates RAG applications." |
+| Role        | Description              | Example column names (any allowed)     |
+|-------------|--------------------------|----------------------------------------|
+| Question    | The question to test     | `question`, `query`, `prompt`           |
+| Ground truth| Expected/correct answer  | `ground_truth`, `expected_answer`, `answer` |
 
-**Important Notes**:
-- Column names must match exactly (case-sensitive)
-- Empty rows will be skipped
-- Questions and ground_truth should be clear and specific
-- See `example_test_plan.csv` for a sample format
+**Notes**:
+- If your CSV has columns named `question` and `ground_truth` (case-insensitive after trim), they are auto-selected
+- Empty cells are allowed; rows are still included
+- See `example_test_plan.csv` for a sample
 
 ## Troubleshooting
 
@@ -260,21 +282,22 @@ The test plan CSV must contain exactly two columns:
 - Verify network connectivity
 - Consider using faster models (Haiku instead of Sonnet)
 
-#### 5. CSV Format Errors
-**Error**: `CSV must contain 'question' and 'ground_truth' columns`
+#### 5. CSV Format / Column Mapping
+**Issue**: CSV has different column names (e.g. `query`, `answer`).
 
-**Solution**:
-- Ensure column names match exactly (case-sensitive)
-- Check CSV encoding (should be UTF-8)
-- Verify no special characters in column headers
-- Use the provided `example_test_plan.csv` as a template
+**Solution**: After uploading, use the **Question column** and **Ground truth column** dropdowns. Ensure at least two columns and UTF-8 encoding.
+
+#### 6. Partial Results After Stop
+**Behavior**: You clicked **⏹️ Stop evaluation** and see a partial CSV.
+
+**Explanation**: The app computes RAGAS metrics for all completed items and offers a download. The filename includes `_partial`. You can run again with a smaller test plan or different settings.
 
 ### Performance Tips
 
-1. **Batch Size**: Process test plans in smaller batches (10-20 questions) for faster results
-2. **Model Selection**: Use Claude Haiku for faster evaluation (lower quality) or Sonnet for better quality (slower)
-3. **Network**: Ensure stable network connection for API and Bedrock calls
-4. **Caching**: Results are not cached - re-running evaluation will make new API calls
+1. **Batch size**: Use the sidebar **Evaluation options** to tune **Max parallel items** and **Per-item timeout**
+2. **Model selection**: Claude Haiku is faster; Sonnet gives higher quality
+3. **Stop early**: Use **⏹️ Stop evaluation** to get partial results without running the full set
+4. **Network**: Stable connection helps for API and Bedrock calls
 
 ## Development
 
@@ -287,11 +310,12 @@ ragas/
 ├── model_config.py          # Model configurations
 ├── config.py                # Configuration constants
 ├── pyproject.toml           # UV project configuration
-├── install.bat              # Main installation script (installs UV if needed + dependencies)
-├── uv-install.bat           # Alternative installation script (tries to install UV + dependencies)
-├── start.bat                # UV startup script
-├── .env                      # Environment variables (create from template below)
-├── example_test_plan.csv    # Example test plan
+├── install.bat / install.sh      # Main installation script (installs UV if needed + dependencies)
+├── uv-install.bat / uv-install.sh # Alternative installation script (UV + dependencies only)
+├── start.bat / start.sh          # Startup script (loads .env, then runs Streamlit)
+├── .env.example                  # Template for .env (copy to .env)
+├── .env                          # Local env vars (gitignored; optional)
+├── example_test_plan.csv         # Example test plan
 └── README.md                # This file
 ```
 
