@@ -539,6 +539,34 @@ def _build_ragas_from_results(
     return result, questions_list
 
 
+def _run_ragas_with_heartbeat(
+    results_by_index: ResultsByIndex,
+    indices: List[int],
+    get_config: Callable[[], Tuple[str, str, str, str, str, str]],
+    n_items: int,
+) -> Tuple[Optional[Any], Optional[List[str]]]:
+    """Run _build_ragas_from_results in a thread while printing a console heartbeat and showing a UI spinner."""
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    future = None
+    with _TPE(max_workers=1) as pool:
+        future = pool.submit(_build_ragas_from_results, results_by_index, indices, get_config)
+        heartbeat_interval = 15
+        start = time.time()
+        with st.spinner(f"⏳ Computing RAGAS metrics for {n_items} items — this may take a few minutes…"):
+            while not future.done():
+                elapsed = int(time.time() - start)
+                mins, secs = divmod(elapsed, 60)
+                logger.info(
+                    "Computing RAGAS metrics… %dm %02ds elapsed (%d items)",
+                    mins, secs, n_items,
+                )
+                try:
+                    future.result(timeout=heartbeat_interval)
+                except FuturesTimeoutError:
+                    pass
+    return future.result()
+
+
 def _clear_ragas_eval_state() -> None:
     for key in (
         "ragas_eval_phase", "ragas_eval_pending", "ragas_eval_results",
@@ -611,6 +639,18 @@ def run_ragas_evaluation(
                 st.progress(frac)
                 st.caption(" &nbsp;|&nbsp; ".join(parts))
 
+        def _show_report_table(results: ResultsByIndex) -> None:
+            """Render the per-item report header + table into report_placeholder (replaces previous content)."""
+            if not results:
+                return
+            with report_placeholder.container():
+                st.subheader("📋 Per-item evaluation report")
+                st.dataframe(
+                    _report_rows_from_results(results),
+                    use_container_width=True,
+                    height=min(400, 50 * len(results)),
+                )
+
         if stopped:
             if not results_by_index:
                 st.warning("Evaluation stopped by user. No items had completed yet.")
@@ -619,15 +659,8 @@ def run_ragas_evaluation(
             indices_done = sorted(results_by_index.keys())
             completed = len(indices_done)
             _update_progress_ui(completed, stage="Stopped — computing RAGAS metrics for partial results…")
-            if results_by_index:
-                st.subheader("📋 Per-item evaluation report")
-            report_placeholder.dataframe(
-                _report_rows_from_results(results_by_index),
-                width="stretch",
-                height=min(400, 50 * completed),
-            )
-            logger.info("Evaluation stopped by user at %d/%d items — computing partial metrics", completed, n_total)
-            result, questions = _build_ragas_from_results(results_by_index, indices_done, get_config)
+            _show_report_table(results_by_index)
+            result, questions = _run_ragas_with_heartbeat(results_by_index, indices_done, get_config, completed)
             _clear_ragas_eval_state()
             return (result, questions, "partial_stopped")
 
@@ -676,12 +709,7 @@ def run_ragas_evaluation(
                             logger.warning("Item %d timed out again after %ds", idx, retry_timeout_sec)
                         except Exception as exc:
                             logger.exception("Item %d failed on retry: %s", idx, exc)
-                st.subheader("📋 Per-item evaluation report")
-                report_placeholder.dataframe(
-                    _report_rows_from_results(results_by_index),
-                    width="stretch",
-                    height=min(400, 50 * len(results_by_index)),
-                )
+                _show_report_table(results_by_index)
 
             indices = sorted(results_by_index.keys())
             if not indices:
@@ -692,8 +720,8 @@ def run_ragas_evaluation(
                 len(results_by_index),
                 stage="Computing RAGAS metrics (faithfulness, context recall, context precision, answer relevancy)…",
             )
-            logger.info("All %d items processed — computing RAGAS metrics", n_total)
-            result, questions = _build_ragas_from_results(results_by_index, indices, get_config)
+            _show_report_table(results_by_index)
+            result, questions = _run_ragas_with_heartbeat(results_by_index, indices, get_config, len(indices))
             counts = _counts_by_status(results_by_index, indices)
             if result is not None:
                 parts = [f"**Per-item:** {counts['success']}/{n_total} succeeded"]
@@ -764,13 +792,7 @@ def run_ragas_evaluation(
                 completed,
                 stage=f"Processing items ({remaining_count} remaining, batch size {len(batch_indices)})",
             )
-            if results_by_index:
-                st.subheader("📋 Per-item evaluation report")
-            report_placeholder.dataframe(
-                _report_rows_from_results(results_by_index),
-                width="stretch",
-                height=min(400, 50 * completed),
-            )
+            _show_report_table(results_by_index)
             logger.info("Batch complete — %d/%d items done, %d remaining", completed, n_total, remaining_count)
             st.session_state.ragas_eval_pending = pending
             st.session_state.ragas_eval_results = results_by_index
