@@ -227,28 +227,14 @@ class StreamlitUI:
             eval_results = st.session_state.get("ragas_eval_results") or {}
             eval_stopped = st.session_state.get("ragas_eval_stopped", False)
             eval_test_data = st.session_state.get("ragas_eval_test_data") or test_data
-            completed = len(eval_results)
+            eval_stage = st.session_state.get("ragas_eval_stage", "")
 
-            if eval_stopped:
-                with st.spinner("Preparing partial results…"):
-                    try:
-                        result, _eval_data, status = evaluation_func(eval_test_data, get_config)
-                        if status == "partial_stopped" and result is not None:
-                            _, _, _, kb_name, mid, emb_id = get_config()
-                            self._render_results(result, kb_name, mid, emb_id, partial=True)
-                        elif status == "partial_stopped":
-                            st.warning("Evaluation stopped by user. No items had completed yet.")
-                    except Exception as e:
-                        st.error(f"❌ Failed to build partial results: {e}")
-                        st.exception(e)
-                return
+            # Show Stop button only during item processing (not during RAGAS scoring)
+            if eval_stage != "scoring" and not eval_stopped:
+                if st.button("⏹️ Stop evaluation", key="eval_stop_btn"):
+                    st.session_state.ragas_eval_stopped = True
+                    st.rerun()
 
-            # Show Stop button (rendered before auto-run so it's visible)
-            if st.button("⏹️ Stop evaluation", key="eval_stop_btn"):
-                st.session_state.ragas_eval_stopped = True
-                st.rerun()
-
-            # Auto-run next batch (progress bar and detailed status are rendered inside evaluation_func)
             try:
                 result, _eval_data, status = evaluation_func(eval_test_data, get_config)
                 if status == "in_progress":
@@ -260,7 +246,7 @@ class StreamlitUI:
                     _, _, _, kb_name, mid, emb_id = get_config()
                     self._render_results(result, kb_name, mid, emb_id)
                 elif status == "partial_stopped":
-                    st.warning("Evaluation stopped. No completed items to show.")
+                    st.warning("Evaluation stopped by user. No items had completed yet.")
             except Exception as e:
                 st.error(f"❌ Evaluation failed: {e}")
                 st.exception(e)
@@ -303,10 +289,17 @@ class StreamlitUI:
     def _render_results(self, result, knowledge_base_name, model_id, embedding_model_id, partial: bool = False):
         """Build results DataFrame from RAGAS result, persist to session state, then render download + table."""
         # Clear chunked-eval state so it doesn't persist into the next rerun
+        executor = st.session_state.pop("ragas_scoring_executor", None)
+        if executor is not None:
+            try:
+                executor.shutdown(wait=False)
+            except Exception:
+                pass
         for key in (
             "ragas_eval_phase", "ragas_eval_pending", "ragas_eval_results",
             "ragas_eval_test_data", "ragas_eval_stopped",
             "ragas_eval_start_time", "ragas_eval_stage",
+            "ragas_scoring_future", "ragas_scoring_start",
         ):
             st.session_state.pop(key, None)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
