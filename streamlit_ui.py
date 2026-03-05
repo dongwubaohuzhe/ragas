@@ -4,9 +4,18 @@ Streamlit UI components for RAGAS Evaluation Tool
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Callable
 import io
-from config import DEFAULT_API_URL, DEFAULT_TENANT, DEFAULT_KB_NAME
+from config import (
+    DEFAULT_API_URL,
+    DEFAULT_TENANT,
+    DEFAULT_KB_NAME,
+    DEFAULT_LLM_MODEL_ID,
+    DEFAULT_EMBEDDING_MODEL_ID,
+    MAX_WORKERS as DEFAULT_MAX_WORKERS,
+    ITEM_TIMEOUT as DEFAULT_ITEM_TIMEOUT,
+)
+from model_config import SUPPORTED_LLM_MODEL_IDS, SUPPORTED_EMBEDDINGS
 
 class StreamlitUI:
     """UI components for the RAGAS evaluation tool"""
@@ -28,27 +37,65 @@ class StreamlitUI:
         if 'sidebar_kb_name' not in st.session_state:
             st.session_state.sidebar_kb_name = self.knowledge_base_name
         if 'sidebar_model_id' not in st.session_state:
-            st.session_state.sidebar_model_id = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+            st.session_state.sidebar_model_id = DEFAULT_LLM_MODEL_ID
         if 'sidebar_embedding_id' not in st.session_state:
-            st.session_state.sidebar_embedding_id = "amazon.titan-embed-text-v2:0"
+            st.session_state.sidebar_embedding_id = DEFAULT_EMBEDDING_MODEL_ID
+        if 'sidebar_max_workers' not in st.session_state:
+            st.session_state.sidebar_max_workers = DEFAULT_MAX_WORKERS
+        if 'sidebar_item_timeout' not in st.session_state:
+            st.session_state.sidebar_item_timeout = DEFAULT_ITEM_TIMEOUT
         
         api_url = st.sidebar.text_input("API URL", value=st.session_state.sidebar_api_url, key="sidebar_api_url_input")
         bearer_token = st.sidebar.text_input("Bearer Token", type="password", value=st.session_state.sidebar_bearer_token, key="sidebar_bearer_token_input")
         tenant = st.sidebar.text_input("Tenant", value=st.session_state.sidebar_tenant, key="sidebar_tenant_input")
         knowledge_base_name = st.sidebar.text_input("Knowledge Base Name", value=st.session_state.sidebar_kb_name, key="sidebar_kb_name_input")
         
+        llm_options = SUPPORTED_LLM_MODEL_IDS
+        try:
+            model_index = llm_options.index(st.session_state.sidebar_model_id) if st.session_state.sidebar_model_id in llm_options else 0
+        except ValueError:
+            model_index = 0
         model_id = st.sidebar.selectbox(
             "LLM Model",
-            ["anthropic.claude-3-5-sonnet-20240620-v1:0","anthropic.claude-3-7-sonnet-20250219-v1:0","amazon.titan-text-express-v1"],
-            index=0 if st.session_state.sidebar_model_id == "anthropic.claude-3-5-sonnet-20240620-v1:0" else (1 if st.session_state.sidebar_model_id == "anthropic.claude-3-7-sonnet-20250219-v1:0" else 2),
+            llm_options,
+            index=model_index,
             key="sidebar_model_id_select"
         )
         
+        embedding_options = SUPPORTED_EMBEDDINGS
+        try:
+            emb_index = embedding_options.index(st.session_state.sidebar_embedding_id) if st.session_state.sidebar_embedding_id in embedding_options else 0
+        except ValueError:
+            emb_index = 0
         embedding_model_id = st.sidebar.selectbox(
             "Embedding Model",
-            ["amazon.titan-embed-text-v2:0"],
+            embedding_options,
+            index=emb_index,
             key="sidebar_embedding_id_select"
         )
+        
+        # Evaluation options (parallelism and timeout)
+        with st.sidebar.expander("⚡ Evaluation options", expanded=False):
+            max_workers = st.number_input(
+                "Max parallel items",
+                min_value=1,
+                max_value=64,
+                value=st.session_state.sidebar_max_workers,
+                step=1,
+                help="Number of questions processed in parallel (1–64). Higher values speed up runs but may hit rate limits.",
+                key="sidebar_max_workers_input",
+            )
+            item_timeout = st.number_input(
+                "Per-item timeout (seconds)",
+                min_value=10,
+                max_value=600,
+                value=st.session_state.sidebar_item_timeout,
+                step=10,
+                help="Max seconds per question (retrieval + answer). Slow items are retried once with 2× this timeout.",
+                key="sidebar_item_timeout_input",
+            )
+            st.session_state.sidebar_max_workers = max_workers
+            st.session_state.sidebar_item_timeout = item_timeout
         
         # Update session state with current values
         st.session_state.sidebar_api_url = api_url
@@ -79,20 +126,22 @@ class StreamlitUI:
         if uploaded_file is not None:
             try:
                 df = pd.read_csv(uploaded_file)
+                if len(df) == 0:
+                    st.warning("⚠️ CSV has no rows. Upload a file with at least one row.")
+                    return None
+                # Normalize column names: strip and lowercase for flexible matching
+                df.columns = df.columns.str.strip().str.lower()
                 st.success(f"✅ Loaded {len(df)} questions from test plan")
                 st.dataframe(df.head(), width='stretch')
-               
-                # Validate required columns
+                # Validate required columns (after normalizing)
                 required_columns = {'question', 'ground_truth'}
                 if not required_columns.issubset(df.columns):
                     missing = required_columns - set(df.columns)
                     st.error(f"❌ CSV must contain 'question' and 'ground_truth' columns. Missing: {', '.join(missing)}")
                     return None
-               
                 # Check for empty rows
                 if df['question'].isna().any() or df['ground_truth'].isna().any():
                     st.warning("⚠️ Some rows have empty questions or ground_truth values. These will be skipped.")
-               
                 return df.to_dict('records')
             except Exception as e:
                 st.error(f"❌ Error reading CSV file: {e}")
@@ -101,24 +150,22 @@ class StreamlitUI:
        
         return None
    
-    def render_evaluation_section(self, test_data: List[Dict[str, str]], 
-                                  config: Tuple[str, str, str, str, str, str], 
-                                  evaluation_func) -> None:
+    def render_evaluation_section(
+        self,
+        test_data: List[Dict[str, str]],
+        get_config: Callable[[], Tuple[str, str, str, str, str, str]],
+        evaluation_func,
+    ) -> None:
         """
-        Render evaluation section with start button
-        
-        Args:
-            test_data: List of test data dictionaries
-            config: Configuration tuple (api_url, bearer_token, tenant, kb_name, model_id, embedding_id)
-            evaluation_func: Function to run evaluation
+        Render evaluation section with start button.
+        get_config() returns (api_url, bearer_token, tenant, kb_name, model_id, embedding_id)
+        so evaluation can read fresh credentials/token on each use and retry.
         """
         st.header("2. Run Evaluation")
         st.info(f"📊 Ready to evaluate {len(test_data)} test cases")
         
         if st.button("🚀 Start RAGAS Evaluation", type="primary"):
-            api_url, bearer_token, tenant, knowledge_base_name, model_id, embedding_model_id = config
-           
-            # Validate configuration
+            api_url, bearer_token, tenant, knowledge_base_name, model_id, embedding_model_id = get_config()
             if not all([api_url, bearer_token, tenant, knowledge_base_name]):
                 missing = [field for field, value in zip(
                     ["API URL", "Bearer Token", "Tenant", "Knowledge Base Name"],
@@ -129,16 +176,13 @@ class StreamlitUI:
            
             with st.spinner("🔄 Running RAGAS evaluation... This may take several minutes."):
                 try:
-                    result, evaluation_data = evaluation_func(
-                        test_data, api_url, bearer_token, tenant,
-                        knowledge_base_name, model_id, embedding_model_id
-                    )
-                   
+                    result, evaluation_data = evaluation_func(test_data, get_config)
                     if result is not None:
-                        self._render_results(result, knowledge_base_name, model_id, embedding_model_id)
+                        # Use current config for result labels
+                        _, _, _, kb_name, mid, emb_id = get_config()
+                        self._render_results(result, kb_name, mid, emb_id)
                     else:
                         st.error("❌ Evaluation completed but no results were generated.")
-                   
                 except Exception as e:
                     st.error(f"❌ Evaluation failed: {e}")
                     st.exception(e)
@@ -164,7 +208,8 @@ class StreamlitUI:
             "Download Results CSV",
             csv_buffer.getvalue(),
             filename,
-            "text/csv"
+            "text/csv",
+            key="download_ragas_results_csv",
         )
        
         st.info(f"Results saved with {len(results_df)} evaluations")
@@ -183,23 +228,25 @@ class StreamlitUI:
                 st.sidebar.error("❌ Please fill in API URL, Bearer Token, Tenant, and Knowledge Base Name")
             else:
                 with st.spinner("Testing API connection..."):
-                    # Temporarily set flag to prevent UI re-rendering during import
+                    # Show only this test result (clear Bedrock result)
+                    if 'bedrock_test_result' in st.session_state:
+                        del st.session_state['bedrock_test_result']
                     original_flag = getattr(st, '_ragas_skip_ui', False)
                     st._ragas_skip_ui = True
                     try:
-                        # Import the functions we need
                         from streamlit_ragas_eval import test_api_connection, extract_model_name_for_api
                         api_model_name = extract_model_name_for_api(model_id)
                         result = test_api_connection(api_url, bearer_token, tenant, knowledge_base_name, api_model_name)
                         st.session_state['api_test_result'] = result
                     finally:
-                        # Always restore the flag
                         st._ragas_skip_ui = original_flag
         
         # Test Bedrock Connection
         if st.sidebar.button("🧪 Test Bedrock Connection", key="test_bedrock_btn"):
             with st.spinner("Testing Bedrock connection..."):
-                # Temporarily set flag to prevent UI re-rendering during import
+                # Show only this test result (clear API result)
+                if 'api_test_result' in st.session_state:
+                    del st.session_state['api_test_result']
                 original_flag = getattr(st, '_ragas_skip_ui', False)
                 st._ragas_skip_ui = True
                 try:
@@ -207,10 +254,9 @@ class StreamlitUI:
                     result = test_bedrock_connection(model_id, embedding_model_id)
                     st.session_state['bedrock_test_result'] = result
                 finally:
-                    # Always restore the flag
                     st._ragas_skip_ui = original_flag
         
-        # Display test results
+        # Display test results (only one at a time: whichever test was run last)
         if 'api_test_result' in st.session_state or 'bedrock_test_result' in st.session_state:
             st.sidebar.markdown("---")
             with st.sidebar.expander("📊 Test Results", expanded=True):
@@ -224,14 +270,12 @@ class StreamlitUI:
                     
                     st.markdown("**API Details:**")
                     for key, value in api_result.get('details', {}).items():
-                        st.text(f"  • {key}: {value}")
+                        st.text(f"  • {key}: {value if isinstance(value, str) else str(value)}")
                     
                     if api_result.get('error'):
                         with st.expander("Error Details"):
                             st.code(api_result['error'], language='text')
-                    
                     st.caption(f"Tested at: {api_result['timestamp']}")
-                    st.markdown("---")
                 
                 # Bedrock Test Results
                 if 'bedrock_test_result' in st.session_state:

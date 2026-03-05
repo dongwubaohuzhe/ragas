@@ -2,6 +2,16 @@
 
 """Model configuration for different Bedrock models"""
 
+# Ordered list of supported LLM model IDs (for UI dropdowns)
+SUPPORTED_LLM_MODEL_IDS = [
+    "anthropic.claude-3-5-sonnet-20240620-v1:0",
+    "anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "anthropic.claude-3-sonnet-20240229-v1:0",
+    "anthropic.claude-3-haiku-20240307-v1:0",
+    "amazon.titan-text-express-v1",
+    "amazon.titan-text-lite-v1",
+]
+
 SUPPORTED_MODELS = {
     "anthropic.claude-3-sonnet-20240229-v1:0": {
         "type": "claude",
@@ -38,4 +48,7 @@ SUPPORTED_EMBEDDINGS = [
 
 def get_model_config(model_id):
     """Get configuration for a specific model"""
-    return SUPPORTED_MODELS.get(model_id, {"type": "default", "kwargs": {"temperature": 0.1}})
+    return SUPPORTED_MODELS.get(
+        model_id,
+        {"type": "default", "kwargs": {"temperature": 0.1, "max_tokens": 1000}},
+    )
