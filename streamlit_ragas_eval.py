@@ -56,14 +56,14 @@ logging.root.setLevel(_LOG_LEVEL)
 logging.root.handlers.clear()
 logging.root.addHandler(_handler)
 # Reduce noise from Streamlit and other libs (only show warnings/errors)
-for _name in (
-    "streamlit",
-    "streamlit.runtime.scriptrunner_utils.script_run_context",
-    "streamlit.runtime.state.session_state_proxy",
-    "urllib3",  # ERROR only: hides "Connection pool is full" and similar
-):
-    _log = logging.getLogger(_name)
-    _log.setLevel(logging.WARNING if _name != "urllib3" else logging.ERROR)
+_NOISY_LOGGERS = {
+    "streamlit": logging.WARNING,
+    "streamlit.runtime.scriptrunner_utils.script_run_context": logging.ERROR,
+    "streamlit.runtime.state.session_state_proxy": logging.ERROR,
+    "urllib3": logging.ERROR,
+}
+for _name, _lvl in _NOISY_LOGGERS.items():
+    logging.getLogger(_name).setLevel(_lvl)
 logger = logging.getLogger(__name__)
 logger.setLevel(_LOG_LEVEL)
 
@@ -354,13 +354,13 @@ _PLACEHOLDER_ANSWER = "Unable to generate answer from available context."
 
 
 def _status_display(status: str) -> str:
-    """Human-readable status label for the report table."""
-    return (
-        "✅ Success" if status == "success"
-        else "⚠️ Partial" if status == "partial"
-        else "❌ Failed" if status == "failed"
-        else "⏱️ Timeout"
-    )
+    """Human-readable status label for the per-item processing report."""
+    return {
+        "success": "✅ Done",
+        "partial": "⚠️ Partial (no context)",
+        "failed": "❌ Failed",
+        "timeout": "⏱️ Timeout",
+    }.get(status, status)
 
 
 def _report_rows_from_results(results_by_index: ResultsByIndex) -> List[Dict[str, Any]]:
@@ -517,6 +517,7 @@ def _build_ragas_from_results(
                 region_name=AWS_REGION_NAME,
                 model_id=embedding_model_id,
             )
+            logger.info("RAGAS evaluate attempt %d/%d for %d items (4 metrics)…", attempt + 1, MAX_RETRIES, len(questions_list))
             result = evaluate(
                 dataset,
                 metrics=[faithfulness, context_recall, context_precision, answer_relevancy],
@@ -527,16 +528,17 @@ def _build_ragas_from_results(
             return result, questions_list
         except Exception as e:
             if _is_expired_token(e):
-                st.error(f"❌ {EXPIRED_TOKEN_MESSAGE}")
                 logger.error(EXPIRED_TOKEN_MESSAGE)
                 return None, None
             if attempt == MAX_RETRIES - 1:
-                st.error(f"Evaluation failed after {MAX_RETRIES} attempts: {e}")
-                logger.error(f"Evaluation failed: {e}", exc_info=True)
+                logger.error("Evaluation failed after %d attempts: %s", MAX_RETRIES, e, exc_info=True)
                 return None, None
-            st.warning(f"Evaluation attempt {attempt + 1} failed, retrying...")
+            logger.warning("Evaluation attempt %d failed (%s), retrying in %ds…", attempt + 1, e, EVALUATION_RETRY_DELAY)
             time.sleep(EVALUATION_RETRY_DELAY)
     return result, questions_list
+
+
+_RAGAS_METRIC_NAMES = "faithfulness, context recall, context precision, answer relevancy"
 
 
 def _run_ragas_with_heartbeat(
@@ -544,21 +546,38 @@ def _run_ragas_with_heartbeat(
     indices: List[int],
     get_config: Callable[[], Tuple[str, str, str, str, str, str]],
     n_items: int,
+    counts: Optional[Dict[str, int]] = None,
 ) -> Tuple[Optional[Any], Optional[List[str]]]:
     """Run _build_ragas_from_results in a thread while printing a console heartbeat and showing a UI spinner."""
     from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    summary = f"{n_items} items"
+    if counts:
+        parts = []
+        if counts.get("success"):
+            parts.append(f"{counts['success']} done")
+        if counts.get("partial"):
+            parts.append(f"{counts['partial']} partial")
+        if counts.get("failed"):
+            parts.append(f"{counts['failed']} failed")
+        if counts.get("timeout"):
+            parts.append(f"{counts['timeout']} timeout")
+        if parts:
+            summary += f" ({', '.join(parts)})"
+
     future = None
     with _TPE(max_workers=1) as pool:
         future = pool.submit(_build_ragas_from_results, results_by_index, indices, get_config)
         heartbeat_interval = 15
         start = time.time()
-        with st.spinner(f"⏳ Computing RAGAS metrics for {n_items} items — this may take a few minutes…"):
+        spinner_msg = f"⏳ Computing RAGAS metrics ({_RAGAS_METRIC_NAMES}) for {summary} — this may take a few minutes…"
+        with st.spinner(spinner_msg):
             while not future.done():
                 elapsed = int(time.time() - start)
                 mins, secs = divmod(elapsed, 60)
                 logger.info(
-                    "Computing RAGAS metrics… %dm %02ds elapsed (%d items)",
-                    mins, secs, n_items,
+                    "Computing RAGAS metrics (%s) for %s… %dm %02ds elapsed",
+                    _RAGAS_METRIC_NAMES, summary, mins, secs,
                 )
                 try:
                     future.result(timeout=heartbeat_interval)
@@ -624,7 +643,7 @@ def run_ragas_evaluation(
             parts = [f"**{completed_count} / {n_total}** items processed"]
             detail_parts = []
             if counts["success"]:
-                detail_parts.append(f"✅ {counts['success']} succeeded")
+                detail_parts.append(f"✅ {counts['success']} done")
             if counts["partial"]:
                 detail_parts.append(f"⚠️ {counts['partial']} partial")
             if counts["failed"]:
@@ -644,10 +663,10 @@ def run_ragas_evaluation(
             if not results:
                 return
             with report_placeholder.container():
-                st.subheader("📋 Per-item evaluation report")
+                st.subheader("📋 Per-item processing report")
                 st.dataframe(
                     _report_rows_from_results(results),
-                    use_container_width=True,
+                    width="stretch",
                     height=min(400, 50 * len(results)),
                 )
 
@@ -658,9 +677,10 @@ def run_ragas_evaluation(
                 return None, None, "partial_stopped"
             indices_done = sorted(results_by_index.keys())
             completed = len(indices_done)
+            partial_counts = _counts_by_status(results_by_index, indices_done)
             _update_progress_ui(completed, stage="Stopped — computing RAGAS metrics for partial results…")
             _show_report_table(results_by_index)
-            result, questions = _run_ragas_with_heartbeat(results_by_index, indices_done, get_config, completed)
+            result, questions = _run_ragas_with_heartbeat(results_by_index, indices_done, get_config, completed, partial_counts)
             _clear_ragas_eval_state()
             return (result, questions, "partial_stopped")
 
@@ -709,32 +729,25 @@ def run_ragas_evaluation(
                             logger.warning("Item %d timed out again after %ds", idx, retry_timeout_sec)
                         except Exception as exc:
                             logger.exception("Item %d failed on retry: %s", idx, exc)
-                _show_report_table(results_by_index)
 
             indices = sorted(results_by_index.keys())
             if not indices:
                 st.error("No valid data generated for evaluation")
                 _clear_ragas_eval_state()
                 return None, None, None
+            counts = _counts_by_status(results_by_index, indices)
             _update_progress_ui(
                 len(results_by_index),
                 stage="Computing RAGAS metrics (faithfulness, context recall, context precision, answer relevancy)…",
             )
-            _show_report_table(results_by_index)
-            result, questions = _run_ragas_with_heartbeat(results_by_index, indices, get_config, len(indices))
-            counts = _counts_by_status(results_by_index, indices)
+            result, questions = _run_ragas_with_heartbeat(
+                results_by_index, indices, get_config, len(indices), counts,
+            )
             if result is not None:
-                parts = [f"**Per-item:** {counts['success']}/{n_total} succeeded"]
-                if counts["partial"]:
-                    parts.append(f"{counts['partial']} partial (retrieval failed)")
-                if counts["failed"]:
-                    parts.append(f"{counts['failed']} failed")
-                if counts["timeout"]:
-                    parts.append(f"{counts['timeout']} timeout")
-                parts.append("**RAGAS metrics computed.** You can download results below.")
-                st.success(" · ".join(parts))
-                logger.info("RAGAS metrics computed — %d succeeded, %d partial, %d failed, %d timeout",
+                logger.info("RAGAS metrics computed — %d done, %d partial, %d failed, %d timeout",
                             counts["success"], counts["partial"], counts["failed"], counts["timeout"])
+            else:
+                st.error("RAGAS metric computation failed. Check the console for details.")
             _clear_ragas_eval_state()
             return (result, questions, None)
 
