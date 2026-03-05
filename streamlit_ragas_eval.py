@@ -7,7 +7,7 @@ from __future__ import annotations
 import streamlit as st
 import requests
 from typing import List, Dict, Any, Optional, Tuple, Callable
-from model_config import get_model_config
+from model_config import get_model_config, get_answer_gen_kwargs, get_api_model_name, get_model_invocation_id
 from config import (
     AWS_REGION_NAME,
     MAX_RETRIES,
@@ -70,8 +70,8 @@ logger.setLevel(_LOG_LEVEL)
 
 # Reduce Bedrock/LangChain console noise: INFO and their ERROR tracebacks (we handle and log errors ourselves)
 logging.getLogger("langchain_aws").setLevel(logging.CRITICAL)
-# Silence RAGAS executor's "Exception raised in Job[N]: TimeoutError()" spam (we handle retries ourselves)
-logging.getLogger("ragas.executor").setLevel(logging.CRITICAL)
+# Reduce RAGAS executor noise but keep errors visible (they explain blank scores)
+logging.getLogger("ragas.executor").setLevel(logging.WARNING)
 logging.getLogger("ragas.utils").setLevel(logging.WARNING)
 # Disable tqdm progress bars on the console (we show progress in the Streamlit UI instead)
 os.environ.setdefault("TQDM_DISABLE", "1")
@@ -103,12 +103,16 @@ class Document:
         self.page_content = page_content
         self.metadata = metadata or {}
 
-# Ordered by specificity (longer match first) for API-friendly model name
+# Ordered by specificity (longer match first) for API-friendly model name.
+# Config-based api_model_name (via get_api_model_name) takes priority; this
+# list is the fallback for models that don't define it in model_config.py.
 _BEDROCK_TO_API_MODEL = [
+    ("claude-sonnet-4-5", "claude-sonnet-4-5"),
     ("claude-3-7-sonnet", "claude-3-7-sonnet"),
     ("claude-3-5-sonnet", "claude-3-5-sonnet"),
     ("claude-3-sonnet", "claude-3-sonnet"),
     ("claude-3-haiku", "claude-3-haiku"),
+    ("nova-pro", "nova-pro"),
     ("titan-text-express", "titan-text-express"),
     ("titan-text-lite", "titan-text-lite"),
 ]
@@ -116,10 +120,52 @@ _BEDROCK_TO_API_MODEL = [
 
 def extract_model_name_for_api(bedrock_model_id: str) -> str:
     """Extract simplified model name from Bedrock model ID for API calls."""
+    name = get_api_model_name(bedrock_model_id)
+    if name:
+        return name
     for substring, api_name in _BEDROCK_TO_API_MODEL:
         if substring in bedrock_model_id:
             return api_name
     return DEFAULT_API_MODEL_NAME
+
+
+def _inference_profile_provider(invocation_id: str) -> Optional[str]:
+    """Detect cross-region inference profile and return the real provider.
+
+    When the invocation ID looks like ``us.anthropic.claude-…`` or
+    ``eu.anthropic.…``, LangChain incorrectly infers provider ``"us"``
+    (or ``"eu"``).  Return the real provider (e.g. ``"anthropic"``) so
+    callers can pass ``provider=`` explicitly to ChatBedrock.
+    """
+    _REGION_PREFIXES = {"us", "eu", "ap", "ca", "sa", "me", "af"}
+    parts = invocation_id.split(".")
+    if len(parts) >= 3 and parts[0] in _REGION_PREFIXES:
+        return parts[1]
+    return None
+
+
+def _make_chat_bedrock(
+    model_id: str,
+    model_kwargs: dict,
+    inference_profile: str = "",
+) -> Any:
+    """Create a ChatBedrock with the correct invocation ID and provider.
+
+    Handles inference-profile resolution and cross-region provider detection
+    so callers don't need to duplicate that logic.
+    """
+    from langchain_aws import ChatBedrock
+
+    invocation_id = get_model_invocation_id(model_id, inference_profile)
+    provider = _inference_profile_provider(invocation_id)
+    chat_kwargs: Dict[str, Any] = {
+        "region_name": AWS_REGION_NAME,
+        "model_id": invocation_id,
+        "model_kwargs": model_kwargs,
+    }
+    if provider:
+        chat_kwargs["provider"] = provider
+    return ChatBedrock(**chat_kwargs)
 
 def _api_config_tuple(
     get_config: Callable[[], Tuple[str, str, str, str, str, str]]
@@ -411,6 +457,7 @@ def _process_one_item(
     index: int,
     item: Dict[str, str],
     config: Tuple[str, str, str, str, str, str],
+    inference_profile: str = "",
 ) -> ItemResult:
     """
     Process one test item (retrieval + answer generation). Runs in worker thread; no st.* or get_config.
@@ -446,14 +493,12 @@ def _process_one_item(
 
     answer: str
     try:
-        from langchain_aws import ChatBedrock
-        model_config = get_model_config(model_id)
-        kwargs = model_config["kwargs"].copy()
+        kwargs = get_answer_gen_kwargs(model_id)
         if "max_tokens" in kwargs:
             kwargs["max_tokens"] = min(MAX_ANSWER_TOKENS, kwargs.get("max_tokens", MAX_ANSWER_TOKENS))
         elif "maxTokenCount" in kwargs:
             kwargs["maxTokenCount"] = min(MAX_ANSWER_TOKENS, kwargs.get("maxTokenCount", MAX_ANSWER_TOKENS))
-        llm_model = ChatBedrock(region_name=AWS_REGION_NAME, model_id=model_id, model_kwargs=kwargs)
+        llm_model = _make_chat_bedrock(model_id, kwargs, inference_profile)
         answer = generate_answer_from_context(question, context_list, llm_model=llm_model)
         if not answer or not answer.strip():
             answer = _PLACEHOLDER_ANSWER
@@ -472,12 +517,28 @@ def _process_one_item(
     return (index, question, ground_truth, context_list, answer, status, duration, error_msg)
 
 
+class _CombinedEvalResult:
+    """Lightweight wrapper so per-metric results look like a single RAGAS EvaluationResult."""
+
+    def __init__(self, df):
+        self._df = df
+
+    def to_pandas(self):
+        return self._df.copy()
+
+
 def _build_ragas_from_results(
     results_by_index: ResultsByIndex,
     indices: List[int],
     get_config: Callable[[], Tuple[str, str, str, str, str, str]],
+    inference_profile: str = "",
+    scoring_progress: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[Any], Optional[List[str]]]:
-    """Build Dataset from results_by_index, run RAGAS evaluate, return (result, questions)."""
+    """Build Dataset from results_by_index, run RAGAS evaluate per metric, return (result, questions).
+
+    Evaluates each metric individually so callers can observe intermediate
+    progress via *scoring_progress* (a shared mutable dict).
+    """
     questions_list = []
     answers_list = []
     contexts_list = []
@@ -490,10 +551,10 @@ def _build_ragas_from_results(
         answers_list.append(ans)
 
     from datasets import Dataset
-    from langchain_aws import ChatBedrock
     from langchain_aws import BedrockEmbeddings
     from ragas import evaluate
     from ragas.metrics import faithfulness, context_recall, context_precision, answer_relevancy
+    from ragas.run_config import RunConfig
 
     dataset = Dataset.from_dict({
         "question": questions_list,
@@ -502,31 +563,87 @@ def _build_ragas_from_results(
         "ground_truth": ground_truths_list,
     })
 
-    result = None
+    ragas_run_config = RunConfig(timeout=300, max_retries=15, max_wait=90)
+    metrics_with_names: List[Tuple[str, Any]] = [
+        ("faithfulness", faithfulness),
+        ("context_recall", context_recall),
+        ("context_precision", context_precision),
+        ("answer_relevancy", answer_relevancy),
+    ]
+    metric_names = [name for name, _ in metrics_with_names]
+    n_metrics = len(metrics_with_names)
+
     for attempt in range(MAX_RETRIES):
         if _shutdown_requested:
             return None, None
         api_url, bearer_token, tenant, knowledge_base_name, model_id, embedding_model_id = get_config()
-        model_config = get_model_config(model_id)
+        model_cfg = get_model_config(model_id)
         try:
-            bedrock_model = ChatBedrock(
-                region_name=AWS_REGION_NAME,
-                model_id=model_id,
-                model_kwargs=model_config["kwargs"],
-            )
+            bedrock_model = _make_chat_bedrock(model_id, model_cfg["kwargs"], inference_profile)
             bedrock_embeddings = BedrockEmbeddings(
                 region_name=AWS_REGION_NAME,
                 model_id=embedding_model_id,
             )
-            logger.info("RAGAS evaluate attempt %d/%d for %d items (4 metrics)…", attempt + 1, MAX_RETRIES, len(questions_list))
-            result = evaluate(
-                dataset,
-                metrics=[faithfulness, context_recall, context_precision, answer_relevancy],
-                llm=bedrock_model,
-                embeddings=bedrock_embeddings,
-                show_progress=False,
-            )
-            return result, questions_list
+
+            if scoring_progress is not None:
+                scoring_progress["attempt"] = attempt + 1
+                scoring_progress["completed_metrics"] = []
+                scoring_progress["current_metric"] = None
+
+            metric_scores: Dict[str, list] = {}
+            for idx, (m_name, m_obj) in enumerate(metrics_with_names):
+                if _shutdown_requested:
+                    return None, None
+                if scoring_progress is not None:
+                    scoring_progress["current_metric"] = m_name
+
+                logger.info(
+                    "Computing %s (metric %d/%d, attempt %d/%d) for %d items…",
+                    m_name, idx + 1, n_metrics, attempt + 1, MAX_RETRIES, len(questions_list),
+                )
+                single_result = evaluate(
+                    dataset,
+                    metrics=[m_obj],
+                    llm=bedrock_model,
+                    embeddings=bedrock_embeddings,
+                    show_progress=False,
+                    raise_exceptions=False,
+                    run_config=ragas_run_config,
+                )
+                single_df = single_result.to_pandas()
+                if m_name in single_df.columns:
+                    metric_scores[m_name] = single_df[m_name].tolist()
+
+                if scoring_progress is not None:
+                    scoring_progress["completed_metrics"] = list(metric_scores.keys())
+
+                logger.info("  ✓ %s complete", m_name)
+
+            if scoring_progress is not None:
+                scoring_progress["current_metric"] = None
+
+            # Combine per-metric scores into a single DataFrame
+            base_df = dataset.to_pandas()
+            for m_name, scores in metric_scores.items():
+                base_df[m_name] = scores
+
+            # Check for NaN scores — RAGAS returns NaN when internal LLM calls fail
+            nan_counts = {c: int(base_df[c].isna().sum()) for c in metric_names if c in base_df.columns}
+            total_nan = sum(nan_counts.values())
+            if total_nan > 0:
+                nan_detail = ", ".join(f"{c}: {n}/{len(base_df)} blank" for c, n in nan_counts.items() if n > 0)
+                logger.warning("RAGAS returned blank (NaN) scores — %s", nan_detail)
+                logger.warning(
+                    "This usually means RAGAS internal LLM calls timed out or failed. "
+                    "Try re-running or increasing the item timeout. Small datasets (< 5 rows) are more susceptible."
+                )
+                all_nan = all(n == len(base_df) for n in nan_counts.values())
+                if all_nan and attempt < MAX_RETRIES - 1:
+                    logger.info("All scores are blank — retrying RAGAS evaluation (attempt %d)…", attempt + 2)
+                    time.sleep(EVALUATION_RETRY_DELAY)
+                    continue
+
+            return _CombinedEvalResult(base_df), questions_list
         except Exception as e:
             if _is_expired_token(e):
                 logger.error(EXPIRED_TOKEN_MESSAGE)
@@ -536,7 +653,7 @@ def _build_ragas_from_results(
                 return None, None
             logger.warning("Evaluation attempt %d failed (%s), retrying in %ds…", attempt + 1, e, EVALUATION_RETRY_DELAY)
             time.sleep(EVALUATION_RETRY_DELAY)
-    return result, questions_list
+    return None, questions_list
 
 
 _RAGAS_METRIC_NAMES = "faithfulness, context recall, context precision, answer relevancy"
@@ -546,11 +663,21 @@ def _start_ragas_scoring(
     results_by_index: ResultsByIndex,
     indices: List[int],
     get_config: Callable[[], Tuple[str, str, str, str, str, str]],
+    inference_profile: str = "",
 ) -> None:
     """Launch RAGAS scoring in a background thread, storing the future in session state."""
     from concurrent.futures import ThreadPoolExecutor as _TPE
+    scoring_progress: Dict[str, Any] = {
+        "current_metric": None,
+        "completed_metrics": [],
+        "total_metrics": 4,
+        "attempt": 1,
+    }
+    st.session_state.ragas_scoring_progress = scoring_progress
     executor = _TPE(max_workers=1)
-    future = executor.submit(_build_ragas_from_results, results_by_index, indices, get_config)
+    future = executor.submit(
+        _build_ragas_from_results, results_by_index, indices, get_config, inference_profile, scoring_progress,
+    )
     st.session_state.ragas_scoring_future = future
     st.session_state.ragas_scoring_executor = executor
     st.session_state.ragas_scoring_start = time.time()
@@ -570,6 +697,7 @@ def _clear_ragas_eval_state() -> None:
         "ragas_eval_test_data", "ragas_eval_stopped",
         "ragas_eval_start_time", "ragas_eval_stage",
         "ragas_scoring_future", "ragas_scoring_start",
+        "ragas_scoring_progress",
     ):
         st.session_state.pop(key, None)
 
@@ -597,6 +725,7 @@ def run_ragas_evaluation(
     ))
     item_timeout_sec = max(10, min(st.session_state.get("sidebar_item_timeout", ITEM_TIMEOUT), 600))
     max_workers = max(1, min(max_workers_cfg, n_total))
+    inference_profile = st.session_state.get("sidebar_inference_profile", "").strip()
 
     # ----- Chunked mode: resume from session state and allow Stop from UI -----
     if st.session_state.get("ragas_eval_phase") == "running":
@@ -660,11 +789,20 @@ def run_ragas_evaluation(
             if current_stage == "scoring":
                 scoring_elapsed = int(time.time() - st.session_state.get("ragas_scoring_start", time.time()))
                 s_mins, s_secs = divmod(scoring_elapsed, 60)
-                _update_progress_ui(
-                    completed,
-                    f"Step 2 of 2 — RAGAS Scoring in progress… ({s_mins}m {s_secs:02d}s)",
-                    f"Metrics: {_RAGAS_METRIC_NAMES}",
-                )
+                sp = st.session_state.get("ragas_scoring_progress") or {}
+                cur_metric = sp.get("current_metric", "")
+                done_metrics = sp.get("completed_metrics", [])
+                total_m = sp.get("total_metrics", 4)
+                done_count = len(done_metrics)
+                if cur_metric:
+                    activity = f"Step 2 of 2 — Computing {cur_metric} ({done_count + 1} of {total_m})… ({s_mins}m {s_secs:02d}s)"
+                else:
+                    activity = f"Step 2 of 2 — RAGAS Scoring in progress… ({s_mins}m {s_secs:02d}s)"
+                detail_parts = [f"✅ {m}" for m in done_metrics]
+                if cur_metric and cur_metric not in done_metrics:
+                    detail_parts.append(f"⏳ {cur_metric}")
+                stage_detail = " · ".join(detail_parts) if detail_parts else f"Metrics: {_RAGAS_METRIC_NAMES}"
+                _update_progress_ui(completed, activity, stage_detail)
             elif pending:
                 _update_progress_ui(
                     completed,
@@ -702,10 +840,15 @@ def run_ragas_evaluation(
                 _clear_ragas_eval_state()
                 return (result, questions, "partial_stopped" if is_partial else None)
 
-            # Still running — overwrite the same console line with updated elapsed time
+            # Still running — overwrite the same console line with per-metric progress
             n_items = len(results_by_index)
+            sp = st.session_state.get("ragas_scoring_progress") or {}
+            cur_metric = sp.get("current_metric", "")
+            done_count = len(sp.get("completed_metrics", []))
+            total_m = sp.get("total_metrics", 4)
+            metric_info = f"metric {done_count + 1}/{total_m} {cur_metric}" if cur_metric else "preparing"
             sys.stderr.write(
-                f"\rINFO: RAGAS scoring ({_RAGAS_METRIC_NAMES}) — {n_items} items — {s_mins}m {s_secs:02d}s elapsed"
+                f"\rINFO: RAGAS scoring — {metric_info} — {n_items} items — {s_mins}m {s_secs:02d}s elapsed"
             )
             sys.stderr.flush()
             time.sleep(3)
@@ -721,7 +864,7 @@ def run_ragas_evaluation(
             if st.session_state.get("ragas_eval_stage") != "scoring":
                 _update_progress_ui(completed, "Stopped — starting RAGAS scoring for partial results…")
                 _show_report_table(results_by_index)
-                _start_ragas_scoring(results_by_index, indices_done, get_config)
+                _start_ragas_scoring(results_by_index, indices_done, get_config, inference_profile)
                 st.session_state.ragas_eval_stopped = True
                 return None, None, "in_progress"
             # scoring already running — handled below in the scoring-stage block
@@ -740,13 +883,13 @@ def run_ragas_evaluation(
                 config = get_config()
                 with ThreadPoolExecutor(max_workers=min(max_workers, len(timeout_indices))) as executor:
                     futures = {
-                        executor.submit(_process_one_item, i, test_data[i], config): i
+                        executor.submit(_process_one_item, i, test_data[i], config, inference_profile): i
                         for i in timeout_indices
                     }
                     for future in futures:
                         if _shutdown_requested:
                             st.warning("Stopped by user (Ctrl+C).")
-                            result, qs = _build_ragas_from_results(results_by_index, sorted(results_by_index.keys()), get_config)
+                            result, qs = _build_ragas_from_results(results_by_index, sorted(results_by_index.keys()), get_config, inference_profile)
                             _clear_ragas_eval_state()
                             return (result, qs, "partial_stopped")
                         idx = futures[future]
@@ -755,7 +898,7 @@ def run_ragas_evaluation(
                             outcome = None
                             while remaining > 0:
                                 if _shutdown_requested:
-                                    result, qs = _build_ragas_from_results(results_by_index, sorted(results_by_index.keys()), get_config)
+                                    result, qs = _build_ragas_from_results(results_by_index, sorted(results_by_index.keys()), get_config, inference_profile)
                                     _clear_ragas_eval_state()
                                     return (result, qs, "partial_stopped")
                                 chunk = min(3, remaining)
@@ -782,7 +925,7 @@ def run_ragas_evaluation(
                     len(results_by_index),
                     "All items processed — starting RAGAS scoring…",
                 )
-                _start_ragas_scoring(results_by_index, indices, get_config)
+                _start_ragas_scoring(results_by_index, indices, get_config, inference_profile)
                 return None, None, "in_progress"
             # scoring already running — handled below in the scoring-stage block
 
@@ -793,7 +936,7 @@ def run_ragas_evaluation(
             if _shutdown_requested:
                 indices_done = sorted(results_by_index.keys())
                 if indices_done:
-                    result, qs = _build_ragas_from_results(results_by_index, indices_done, get_config)
+                    result, qs = _build_ragas_from_results(results_by_index, indices_done, get_config, inference_profile)
                     _clear_ragas_eval_state()
                     return (result, qs, "partial_stopped")
                 _clear_ragas_eval_state()
@@ -803,7 +946,7 @@ def run_ragas_evaluation(
             config = get_config()
             with ThreadPoolExecutor(max_workers=len(batch_indices)) as executor:
                 futures = {
-                    executor.submit(_process_one_item, i, test_data[i], config): i
+                    executor.submit(_process_one_item, i, test_data[i], config, inference_profile): i
                     for i in batch_indices
                 }
                 for future in futures:
@@ -944,13 +1087,14 @@ def test_api_connection(api_url: str, bearer_token: str, tenant: str,
     
     return result
 
-def test_bedrock_connection(model_id: str, embedding_model_id: str) -> Dict[str, Any]:
+def test_bedrock_connection(model_id: str, embedding_model_id: str, inference_profile: str = "") -> Dict[str, Any]:
     """
-    Test Bedrock connection by initializing models
-    
+    Test Bedrock connection by initializing models.
+
     Args:
         model_id: Bedrock LLM model ID
         embedding_model_id: Bedrock embedding model ID
+        inference_profile: Optional inference profile ID or ARN override
         
     Returns:
         Dictionary with test results
@@ -965,23 +1109,19 @@ def test_bedrock_connection(model_id: str, embedding_model_id: str) -> Dict[str,
     
     llm_test = {"success": False, "error": None}
     embedding_test = {"success": False, "error": None}
+    invocation_id = get_model_invocation_id(model_id, inference_profile)
     
     # Test LLM connection
     try:
-        from langchain_aws import ChatBedrock
         from langchain_aws import BedrockEmbeddings
-        model_config = get_model_config(model_id)
+        model_cfg = get_model_config(model_id)
         start_time = time.time()
-        llm_model = ChatBedrock(
-            region_name=AWS_REGION_NAME,
-            model_id=model_id,
-            model_kwargs=model_config["kwargs"]
-        )
+        llm_model = _make_chat_bedrock(model_id, model_cfg["kwargs"], inference_profile)
         elapsed_time = time.time() - start_time
         llm_test["success"] = True
         llm_test["init_time"] = f"{elapsed_time:.2f}s"
         result["details"]["llm"] = {
-            "model_id": model_id,
+            "model_id": invocation_id,
             "status": "✅ Connected",
             "init_time": f"{elapsed_time:.2f}s"
         }
@@ -989,7 +1129,7 @@ def test_bedrock_connection(model_id: str, embedding_model_id: str) -> Dict[str,
         err_msg = _format_bedrock_error(e)
         llm_test["error"] = err_msg
         result["details"]["llm"] = {
-            "model_id": model_id,
+            "model_id": invocation_id,
             "status": "❌ Failed",
             "error": err_msg[:200]
         }

@@ -34,6 +34,7 @@ class StreamlitUI:
             "sidebar_tenant": self.tenant,
             "sidebar_kb_name": self.knowledge_base_name,
             "sidebar_model_id": DEFAULT_LLM_MODEL_ID,
+            "sidebar_inference_profile": "",
             "sidebar_embedding_id": DEFAULT_EMBEDDING_MODEL_ID,
             "sidebar_max_workers": DEFAULT_MAX_WORKERS,
             "sidebar_item_timeout": DEFAULT_ITEM_TIMEOUT,
@@ -58,7 +59,18 @@ class StreamlitUI:
             index=model_index,
             key="sidebar_model_id_select"
         )
-        
+
+        inference_profile = st.sidebar.text_input(
+            "Inference Profile ID or ARN (optional)",
+            value=st.session_state.sidebar_inference_profile,
+            key="sidebar_inference_profile_input",
+            help=(
+                "Override the default model invocation ID with an inference profile ID or ARN. "
+                "Required in GovCloud and some restricted regions where on-demand invocation "
+                "is not supported (e.g. us.anthropic.claude-sonnet-4-5-20250929-v1:0)."
+            ),
+        )
+
         embedding_options = SUPPORTED_EMBEDDINGS
         try:
             emb_index = embedding_options.index(st.session_state.sidebar_embedding_id) if st.session_state.sidebar_embedding_id in embedding_options else 0
@@ -100,6 +112,7 @@ class StreamlitUI:
         st.session_state.sidebar_tenant = tenant
         st.session_state.sidebar_kb_name = knowledge_base_name
         st.session_state.sidebar_model_id = model_id
+        st.session_state.sidebar_inference_profile = inference_profile
         st.session_state.sidebar_embedding_id = embedding_model_id
        
         # Connection Testing Section
@@ -264,27 +277,14 @@ class StreamlitUI:
                 st.error(f"❌ Please fill in all configuration fields. Missing: {', '.join(missing)}")
                 return
 
-            # Start chunked evaluation: set state so first run enters chunked mode
+            # Start chunked evaluation: set state and immediately rerun so the
+            # progress UI appears before any processing begins.
             st.session_state.ragas_eval_phase = "running"
             st.session_state.ragas_eval_pending = list(range(n_total))
             st.session_state.ragas_eval_results = {}
             st.session_state.ragas_eval_test_data = test_data
             st.session_state.ragas_eval_stopped = False
-
-            try:
-                result, _eval_data, status = evaluation_func(test_data, get_config)
-                if status == "in_progress":
-                    st.rerun()
-                elif result is not None:
-                    _, _, _, kb_name, mid, emb_id = get_config()
-                    self._render_results(result, kb_name, mid, emb_id, partial=(status == "partial_stopped"))
-                elif status == "partial_stopped":
-                    st.warning("Evaluation stopped by user. No completed items to show.")
-                else:
-                    st.error("❌ Evaluation completed but no results were generated.")
-            except Exception as e:
-                st.error(f"❌ Evaluation failed: {e}")
-                st.exception(e)
+            st.rerun()
 
     def _render_results(self, result, knowledge_base_name, model_id, embedding_model_id, partial: bool = False):
         """Build results DataFrame from RAGAS result, persist to session state, then render download + table."""
@@ -300,6 +300,7 @@ class StreamlitUI:
             "ragas_eval_test_data", "ragas_eval_stopped",
             "ragas_eval_start_time", "ragas_eval_stage",
             "ragas_scoring_future", "ragas_scoring_start",
+            "ragas_scoring_progress",
         ):
             st.session_state.pop(key, None)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -330,6 +331,19 @@ class StreamlitUI:
             )
         else:
             st.success("Evaluation completed!")
+
+        # Warn if any metric scores are blank (NaN)
+        metric_cols = [c for c in results_df.columns if c in ("faithfulness", "context_recall", "context_precision", "answer_relevancy")]
+        if metric_cols:
+            nan_counts = {c: int(results_df[c].isna().sum()) for c in metric_cols}
+            total_nan = sum(nan_counts.values())
+            if total_nan > 0:
+                nan_detail = ", ".join(f"**{c}**: {n}/{len(results_df)}" for c, n in nan_counts.items() if n > 0)
+                st.warning(
+                    f"⚠️ Some metric scores are blank: {nan_detail}. "
+                    "This happens when RAGAS internal LLM calls time out or fail. "
+                    "Try re-running the evaluation — small datasets (< 5 rows) are more susceptible."
+                )
         st.header("3. Download Results")
         kb_name = meta.get("knowledge_base_name", "")
         timestamp = meta.get("timestamp", datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -387,7 +401,8 @@ class StreamlitUI:
                 st._ragas_skip_ui = True
                 try:
                     from streamlit_ragas_eval import test_bedrock_connection
-                    result = test_bedrock_connection(model_id, embedding_model_id)
+                    inf_profile = st.session_state.get("sidebar_inference_profile", "")
+                    result = test_bedrock_connection(model_id, embedding_model_id, inf_profile)
                     st.session_state['bedrock_test_result'] = result
                 finally:
                     st._ragas_skip_ui = original_flag

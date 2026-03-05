@@ -7,11 +7,13 @@ Automated testing framework for RAGAS (Retrieval Augmented Generation Assessment
 - Knowledge base retrieval testing
 - Generation quality assessment
 - Automated evaluation metrics (Faithfulness, Context Recall, Context Precision, Answer Relevancy)
+- Per-metric scoring progress on UI and console (see which metric is computing and which are done)
 - Performance benchmarking
 - CSV-based test plan upload with **column mapping** (choose which columns are question and ground truth)
 - **Stop evaluation** from the UI; download partial results when stopped
 - Results retained until you load a different file
 - Configurable model selection and evaluation options (parallelism, timeout)
+- Optional **inference profile** support for GovCloud and restricted regions
 
 ## Architecture
 
@@ -37,8 +39,9 @@ The application requires **two separate connections**:
   3. **Embeddings**: Uses `BedrockEmbeddings` for semantic similarity calculations
 - **Authentication**: AWS credentials (from environment, IAM role, or credentials file)
 - **Supported Models**:
-  - LLM: Claude 3.5 Sonnet, Claude 3.7 Sonnet, Amazon Titan Text Express
-  - Embeddings: Amazon Titan Embed Text v2
+  - LLM: Claude Sonnet 4.5, Claude 3.7 Sonnet, Claude 3.5 Sonnet, Claude 3 Sonnet, Claude 3 Haiku, Amazon Nova Pro, Amazon Titan Text Express, Amazon Titan Text Lite
+  - Embeddings: Amazon Titan Embed Text v1/v2, Cohere Embed English/Multilingual v3
+- **Inference Profiles**: Optional cross-region inference profile support for environments where on-demand model invocation is not available (e.g. GovCloud). Claude Sonnet 4.5 uses an inference profile by default.
 
 ### Architecture Diagram
 ```
@@ -199,8 +202,9 @@ In the sidebar, configure:
 - **Bearer Token**: Authentication token for the API
 - **Tenant**: Tenant identifier
 - **Knowledge Base Name**: Name of the knowledge base to query
-- **LLM Model**: Bedrock model for evaluation (Claude 3.5/3.7 Sonnet or Titan)
-- **Embedding Model**: Bedrock embedding model (Titan Embed v2)
+- **LLM Model**: Bedrock model for evaluation (Claude Sonnet 4.5, Claude 3.x family, Nova Pro, Titan)
+- **Inference Profile ID or ARN** (optional): Override the model invocation ID with an inference profile. Required in GovCloud and some restricted regions where on-demand invocation is not supported. Claude Sonnet 4.5 automatically uses a cross-region inference profile (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`) when this field is left empty.
+- **Embedding Model**: Bedrock embedding model (Titan Embed, Cohere Embed)
 
 ### Step 3: Upload and Run
 
@@ -273,7 +277,15 @@ The test plan CSV must have **at least two columns**. After upload, you choose w
 - Check model availability in `us-gov-west-1` region
 - Ensure your AWS account has access to the selected model
 
-#### 4. Evaluation Timeout
+#### 4. "Provider us model does not support chat" / On-demand not supported
+**Error**: `Provider us model does not support chat` or `Invocation of model ID ... with on-demand throughput isn't supported`
+
+**Solution**:
+- Some models (e.g. Claude Sonnet 4.5) require an **inference profile** instead of the base model ID. The app handles this automatically for Claude Sonnet 4.5 using a cross-region profile.
+- If you still see the error, enter the correct inference profile ID or ARN in the sidebar **Inference Profile ID or ARN** field. Example: `us.anthropic.claude-sonnet-4-5-20250929-v1:0`
+- For GovCloud or restricted regions, ask your AWS admin for the inference profile ARN for your model.
+
+#### 5. Evaluation Timeout
 **Error**: Evaluation takes too long or times out
 
 **Solutions**:
@@ -282,12 +294,12 @@ The test plan CSV must have **at least two columns**. After upload, you choose w
 - Verify network connectivity
 - Consider using faster models (Haiku instead of Sonnet)
 
-#### 5. CSV Format / Column Mapping
+#### 6. CSV Format / Column Mapping
 **Issue**: CSV has different column names (e.g. `query`, `answer`).
 
 **Solution**: After uploading, use the **Question column** and **Ground truth column** dropdowns. Ensure at least two columns and UTF-8 encoding.
 
-#### 6. Partial Results After Stop
+#### 7. Partial Results After Stop
 **Behavior**: You clicked **⏹️ Stop evaluation** and see a partial CSV.
 
 **Explanation**: The app computes RAGAS metrics for all completed items and offers a download. The filename includes `_partial`. You can run again with a smaller test plan or different settings.
