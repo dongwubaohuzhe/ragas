@@ -2,14 +2,11 @@
 RAGAS Evaluation Tool - Main Application
 Evaluates RAG systems using RAGAS metrics
 """
+from __future__ import annotations
+
 import streamlit as st
 import requests
-from datasets import Dataset
 from typing import List, Dict, Any, Optional, Tuple, Callable
-from langchain_aws import ChatBedrock
-from langchain_aws import BedrockEmbeddings
-from ragas import evaluate
-from ragas.metrics import faithfulness, context_recall, context_precision, answer_relevancy
 from model_config import get_model_config
 from config import (
     AWS_REGION_NAME,
@@ -29,8 +26,24 @@ import time
 import random
 import logging
 import os
+import signal
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+# Allow quick stop with Ctrl+C: set flag and raise so process exits promptly
+_shutdown_requested = False
+
+def _handle_shutdown(signum: int, frame: Any) -> None:
+    global _shutdown_requested
+    _shutdown_requested = True
+    raise KeyboardInterrupt()
+
+try:
+    signal.signal(signal.SIGINT, _handle_shutdown)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _handle_shutdown)
+except (ValueError, OSError):
+    pass  # signal may not be available in all contexts (e.g. some threads)
 
 # User-friendly console logging: clean format, less noise from third-party libs.
 # Set LOG_LEVEL=WARNING or LOG_LEVEL=ERROR to reduce output (default: INFO).
@@ -204,8 +217,8 @@ class SimpleAPIRetriever:
 def generate_answer_from_context(
     question: str,
     contexts: List[str],
-    llm_model: Optional[ChatBedrock] = None,
-    get_llm_model: Optional[Callable[[], ChatBedrock]] = None,
+    llm_model: Optional[Any] = None,
+    get_llm_model: Optional[Callable[[], Any]] = None,
 ) -> str:
     """
     Generate an answer from context using LLM or extractive methods.
@@ -340,6 +353,7 @@ def _process_one_item(
 
     answer: str
     try:
+        from langchain_aws import ChatBedrock
         model_config = get_model_config(model_id)
         kwargs = model_config["kwargs"].copy()
         if "max_tokens" in kwargs:
@@ -395,6 +409,9 @@ def run_ragas_evaluation(
     max_workers = max(1, min(max_workers_cfg, n_total))
 
     while pending:
+        if _shutdown_requested:
+            st.warning("Stopped by user (Ctrl+C).")
+            return None, None
         batch_indices = pending[:max_workers]
         pending = pending[max_workers:]
         config = get_config()
@@ -405,9 +422,26 @@ def run_ragas_evaluation(
                 for i in batch_indices
             }
             for future in futures:
+                if _shutdown_requested:
+                    st.warning("Stopped by user (Ctrl+C).")
+                    return None, None
                 idx = futures[future]
                 try:
-                    outcome = future.result(timeout=item_timeout_sec)
+                    # Wait in short chunks so Ctrl+C is respected within a few seconds
+                    remaining = item_timeout_sec
+                    outcome = None
+                    while remaining > 0:
+                        if _shutdown_requested:
+                            st.warning("Stopped by user (Ctrl+C).")
+                            return None, None
+                        chunk = min(3, remaining)
+                        try:
+                            outcome = future.result(timeout=chunk)
+                            break
+                        except FuturesTimeoutError:
+                            remaining -= chunk
+                    if outcome is None:
+                        raise FuturesTimeoutError()
                     (
                         _i, question, ground_truth, context_list, answer,
                         status, duration, error_msg
@@ -456,7 +490,7 @@ def run_ragas_evaluation(
 
     # Retry timed-out items once with 2× timeout
     timeout_indices = [i for i in indices if results_by_index[i][4] == "timeout"]
-    if timeout_indices:
+    if timeout_indices and not _shutdown_requested:
         retry_timeout_sec = item_timeout_sec * 2
         st.info(f"🔄 Retrying {len(timeout_indices)} timed-out item(s) with {retry_timeout_sec}s timeout…")
         config = get_config()
@@ -466,18 +500,35 @@ def run_ragas_evaluation(
                 for i in timeout_indices
             }
             for future in futures:
+                if _shutdown_requested:
+                    st.warning("Stopped by user (Ctrl+C).")
+                    return None, None
                 idx = futures[future]
                 try:
-                    outcome = future.result(timeout=retry_timeout_sec)
-                    (
-                        _i, question, ground_truth, context_list, answer,
-                        status, duration, error_msg
-                    ) = outcome
-                    results_by_index[idx] = (
-                        question, ground_truth, context_list, answer, status, duration, error_msg
-                    )
-                    if status == "success":
-                        logger.info(f"Item {idx} succeeded on retry")
+                    remaining = retry_timeout_sec
+                    outcome = None
+                    while remaining > 0:
+                        if _shutdown_requested:
+                            st.warning("Stopped by user (Ctrl+C).")
+                            return None, None
+                        chunk = min(3, remaining)
+                        try:
+                            outcome = future.result(timeout=chunk)
+                            break
+                        except FuturesTimeoutError:
+                            remaining -= chunk
+                    if outcome is not None:
+                        (
+                            _i, question, ground_truth, context_list, answer,
+                            status, duration, error_msg
+                        ) = outcome
+                        results_by_index[idx] = (
+                            question, ground_truth, context_list, answer, status, duration, error_msg
+                        )
+                        if status == "success":
+                            logger.info(f"Item {idx} succeeded on retry")
+                    else:
+                        logger.warning(f"Item {idx} timed out again after {retry_timeout_sec}s")
                 except FuturesTimeoutError:
                     logger.warning(f"Item {idx} timed out again after {retry_timeout_sec}s")
                 except Exception as e:
@@ -511,6 +562,12 @@ def run_ragas_evaluation(
         st.error("No valid data generated for evaluation")
         return None, None
 
+    from datasets import Dataset
+    from langchain_aws import ChatBedrock
+    from langchain_aws import BedrockEmbeddings
+    from ragas import evaluate
+    from ragas.metrics import faithfulness, context_recall, context_precision, answer_relevancy
+
     dataset = Dataset.from_dict({
         "question": questions,
         "answer": answers,
@@ -525,6 +582,9 @@ def run_ragas_evaluation(
     # RAGAS evaluate with fresh Bedrock clients on retry
     result = None
     for attempt in range(MAX_RETRIES):
+        if _shutdown_requested:
+            st.warning("Stopped by user (Ctrl+C).")
+            return None, None
         api_url, bearer_token, tenant, knowledge_base_name, model_id, embedding_model_id = get_config()
         model_config = get_model_config(model_id)
         try:
@@ -669,6 +729,8 @@ def test_bedrock_connection(model_id: str, embedding_model_id: str) -> Dict[str,
     
     # Test LLM connection
     try:
+        from langchain_aws import ChatBedrock
+        from langchain_aws import BedrockEmbeddings
         model_config = get_model_config(model_id)
         start_time = time.time()
         llm_model = ChatBedrock(
@@ -693,7 +755,7 @@ def test_bedrock_connection(model_id: str, embedding_model_id: str) -> Dict[str,
         }
         logger.error(f"LLM test error: {e}", exc_info=True)
     
-    # Test Embedding connection
+    # Test Embedding connection (BedrockEmbeddings imported above)
     try:
         start_time = time.time()
         embedding_model = BedrockEmbeddings(
