@@ -411,13 +411,18 @@ def _status_display(status: str) -> str:
 
 
 def _report_rows_from_results(results_by_index: ResultsByIndex) -> List[Dict[str, Any]]:
-    """Build report table rows from results_by_index for display in the UI."""
+    """Build report table rows from results_by_index for display in the UI.
+
+    Full Question and Answer text is included so users can hover/click a cell
+    in the Streamlit data grid to see the complete content.
+    """
     rows = []
     for i in sorted(results_by_index.keys()):
-        q, _gt, _ctx_list, _ans, status, dur, err = results_by_index[i]
+        q, _gt, _ctx_list, ans, status, dur, err = results_by_index[i]
         rows.append({
             "Index": i + 1,
-            "Question": (q[:60] + "…") if len(q) > 60 else q,
+            "Question": q,
+            "Answer": ans,
             "Status": _status_display(status),
             "Duration (s)": f"{dur:.1f}",
             "Error": err or "",
@@ -742,11 +747,35 @@ def run_ragas_evaluation(
         activity_placeholder = st.empty()
         progress_placeholder = st.empty()
         status_placeholder = st.empty()
+        help_placeholder = st.empty()
         report_header_placeholder = st.empty()
         report_table_placeholder = st.empty()
 
-        def _update_progress_ui(completed_count: int, activity: str, stage_detail: str = "") -> None:
-            """Refresh activity headline, progress bar, and status line."""
+        _HELP_STEP1 = (
+            "**What's happening:** For each question, the app calls your knowledge base API "
+            "to retrieve context documents, then sends context + question to the Bedrock LLM "
+            "to generate an answer. Items run in parallel batches.  \n"
+            "**Statuses:** ✅ OK = retrieval + generation succeeded · "
+            "⚠️ No context = API returned no documents (placeholder used) · "
+            "❌ Error = LLM answer generation failed · "
+            "⏱️ Timeout = item exceeded the per-item timeout limit."
+        )
+        _HELP_STEP2 = (
+            "**What's happening:** RAGAS evaluates answer quality by making its own LLM calls "
+            "to score each metric independently across all items. No new retrieval calls are "
+            "made — this step uses the answers and contexts from Step 1.  \n"
+            "**Metrics:** Faithfulness (is the answer consistent with the context?), "
+            "Context Recall (does the context cover the ground truth?), "
+            "Context Precision (is the context relevant to the question?), "
+            "Answer Relevancy (is the answer relevant to the question?)."
+        )
+        _HELP_TRANSITION = (
+            "All retrieval and answer generation complete. "
+            "Starting RAGAS metric computation (4 metrics, each scored independently via LLM calls)…"
+        )
+
+        def _update_progress_ui(completed_count: int, activity: str, stage_detail: str = "", help_text: str = "") -> None:
+            """Refresh activity headline, progress bar, status line, and contextual help."""
             frac = completed_count / n_total if n_total else 0
             elapsed = time.time() - st.session_state.get("ragas_eval_start_time", time.time())
             mins, secs = divmod(int(elapsed), 60)
@@ -769,6 +798,8 @@ def run_ragas_evaluation(
             activity_placeholder.markdown(f"### {activity}")
             progress_placeholder.progress(frac)
             status_placeholder.caption(" &nbsp;|&nbsp; ".join(parts))
+            if help_text:
+                help_placeholder.info(help_text)
 
         def _show_report_table(results: ResultsByIndex) -> None:
             """Render the per-item report into separate header + table placeholders."""
@@ -781,7 +812,11 @@ def run_ragas_evaluation(
                 height=min(400, 50 * len(results)),
             )
 
-        # Immediately render current progress from session state so the UI is never blank after a rerun
+        # Immediately render current progress from session state so the UI is never blank after a rerun.
+        # The report table is ONLY rendered here for the scoring stage (which returns early via
+        # time.sleep + return before any other code path can re-render).  For Step 1 batch
+        # processing and the stopped/transition paths, the downstream code renders the table
+        # exactly once to avoid duplicates.
         if results_by_index and not stopped:
             completed = len(results_by_index)
             remaining_count = len(pending)
@@ -802,15 +837,16 @@ def run_ragas_evaluation(
                 if cur_metric and cur_metric not in done_metrics:
                     detail_parts.append(f"⏳ {cur_metric}")
                 stage_detail = " · ".join(detail_parts) if detail_parts else f"Metrics: {_RAGAS_METRIC_NAMES}"
-                _update_progress_ui(completed, activity, stage_detail)
+                _update_progress_ui(completed, activity, stage_detail, _HELP_STEP2)
+                _show_report_table(results_by_index)
             elif pending:
                 _update_progress_ui(
                     completed,
                     f"Step 1 of 2 — Retrieving & generating answers… ({remaining_count} remaining)",
+                    help_text=_HELP_STEP1,
                 )
             else:
-                _update_progress_ui(completed, "All items processed — preparing RAGAS scoring…")
-            _show_report_table(results_by_index)
+                _update_progress_ui(completed, "All items processed — preparing RAGAS scoring…", help_text=_HELP_TRANSITION)
 
         # ----- Scoring stage: RAGAS metrics running in background thread -----
         if st.session_state.get("ragas_eval_stage") == "scoring":
@@ -862,7 +898,7 @@ def run_ragas_evaluation(
             indices_done = sorted(results_by_index.keys())
             completed = len(indices_done)
             if st.session_state.get("ragas_eval_stage") != "scoring":
-                _update_progress_ui(completed, "Stopped — starting RAGAS scoring for partial results…")
+                _update_progress_ui(completed, "Stopped — starting RAGAS scoring for partial results…", help_text=_HELP_STEP2)
                 _show_report_table(results_by_index)
                 _start_ragas_scoring(results_by_index, indices_done, get_config, inference_profile)
                 st.session_state.ragas_eval_stopped = True
@@ -878,6 +914,7 @@ def run_ragas_evaluation(
                 _update_progress_ui(
                     len(results_by_index),
                     f"Retrying {len(timeout_indices)} timed-out item(s) (timeout {retry_timeout_sec}s)…",
+                    help_text=_HELP_STEP1,
                 )
                 logger.info("Retrying %d timed-out items with %ds timeout", len(timeout_indices), retry_timeout_sec)
                 config = get_config()
@@ -924,7 +961,9 @@ def run_ragas_evaluation(
                 _update_progress_ui(
                     len(results_by_index),
                     "All items processed — starting RAGAS scoring…",
+                    help_text=_HELP_TRANSITION,
                 )
+                _show_report_table(results_by_index)
                 _start_ragas_scoring(results_by_index, indices, get_config, inference_profile)
                 return None, None, "in_progress"
             # scoring already running — handled below in the scoring-stage block
@@ -982,6 +1021,7 @@ def run_ragas_evaluation(
             _update_progress_ui(
                 completed,
                 f"Step 1 of 2 — Retrieving & generating answers… ({remaining_count} remaining)",
+                help_text=_HELP_STEP1,
             )
             _show_report_table(results_by_index)
             logger.info("Batch complete — %d/%d items done, %d remaining", completed, n_total, remaining_count)

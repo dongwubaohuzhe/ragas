@@ -41,7 +41,7 @@ The application requires **two separate connections**:
 - **Supported Models**:
   - LLM: Claude Sonnet 4.5, Claude 3.7 Sonnet, Claude 3.5 Sonnet, Claude 3 Sonnet, Claude 3 Haiku, Amazon Nova Pro, Amazon Titan Text Express, Amazon Titan Text Lite
   - Embeddings: Amazon Titan Embed Text v1/v2, Cohere Embed English/Multilingual v3
-- **Inference Profiles**: Optional cross-region inference profile support for environments where on-demand model invocation is not available (e.g. GovCloud). Claude Sonnet 4.5 uses an inference profile by default.
+- **Inference Profiles**: Optional cross-region inference profile support for environments where on-demand model invocation is not available (e.g. GovCloud). All models use their base model ID by default; enter an inference profile in the sidebar only if on-demand invocation is not supported in your account/region.
 
 ### Architecture Diagram
 ```
@@ -203,7 +203,7 @@ In the sidebar, configure:
 - **Tenant**: Tenant identifier
 - **Knowledge Base Name**: Name of the knowledge base to query
 - **LLM Model**: Bedrock model for evaluation (Claude Sonnet 4.5, Claude 3.x family, Nova Pro, Titan)
-- **Inference Profile ID or ARN** (optional): Override the model invocation ID with an inference profile. Required in GovCloud and some restricted regions where on-demand invocation is not supported. Claude Sonnet 4.5 automatically uses a cross-region inference profile (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`) when this field is left empty.
+- **Inference Profile ID or ARN** (optional): Override the base model ID with an inference profile ID or ARN. Leave blank for standard on-demand invocation. Only needed in GovCloud or restricted regions where on-demand invocation is not supported — for example, enter `us.anthropic.claude-sonnet-4-5-20250929-v1:0` for Claude Sonnet 4.5 cross-region access.
 - **Embedding Model**: Bedrock embedding model (Titan Embed, Cohere Embed)
 
 ### Step 3: Upload and Run
@@ -278,11 +278,12 @@ The test plan CSV must have **at least two columns**. After upload, you choose w
 - Ensure your AWS account has access to the selected model
 
 #### 4. "Provider us model does not support chat" / On-demand not supported
-**Error**: `Provider us model does not support chat` or `Invocation of model ID ... with on-demand throughput isn't supported`
+**Error**: `Provider us model does not support chat` or `Invocation of model ID ... with on-demand throughput isn't supported` or `The provided model identifier is invalid`
 
 **Solution**:
-- Some models (e.g. Claude Sonnet 4.5) require an **inference profile** instead of the base model ID. The app handles this automatically for Claude Sonnet 4.5 using a cross-region profile.
-- If you still see the error, enter the correct inference profile ID or ARN in the sidebar **Inference Profile ID or ARN** field. Example: `us.anthropic.claude-sonnet-4-5-20250929-v1:0`
+- By default the app invokes Bedrock using the base model ID (e.g. `anthropic.claude-sonnet-4-5-20250929-v1:0`). This works in most accounts where on-demand access is enabled for the model.
+- If on-demand invocation is **not** supported in your account/region (common in GovCloud), enter an inference profile ID or ARN in the sidebar **Inference Profile ID or ARN** field. Example: `us.anthropic.claude-sonnet-4-5-20250929-v1:0`
+- The "Provider us model does not support chat" error means the app is passing a cross-region inference profile (e.g. `us.anthropic.*`) and the LangChain provider isn't being detected correctly — this is handled automatically when you use the sidebar field, but check that the profile ID is correct.
 - For GovCloud or restricted regions, ask your AWS admin for the inference profile ARN for your model.
 
 #### 5. Evaluation Timeout

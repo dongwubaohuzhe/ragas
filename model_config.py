@@ -93,10 +93,10 @@ def get_model_invocation_id(model_id: str, override: str = "") -> str:
     """Return the invocation ID for Bedrock API calls.
 
     If *override* is provided (e.g. from the UI sidebar), use that.
-    Otherwise return ``inference_profile_id`` from config if set, else the
-    base *model_id*.
+    Otherwise return the base *model_id* for standard on-demand invocation.
+    The ``inference_profile_id`` in config is only a hint for the UI help
+    text; it is never applied automatically.
     """
     if override and override.strip():
         return override.strip()
-    cfg = SUPPORTED_MODELS.get(model_id, {})
-    return cfg.get("inference_profile_id", model_id)
+    return model_id
